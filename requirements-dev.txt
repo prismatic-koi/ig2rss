@@ -1,0 +1,18 @@
+# Development and testing dependencies for ig2rss
+
+# Include production requirements
+-r requirements.txt
+
+# Testing framework
+pytest==8.3.4
+pytest-cov==6.0.0
+pytest-mock==3.14.0
+
+# Code formatting
+black==24.10.0
+
+# Code linting
+flake8==7.1.1
+
+# Type checking
+mypy==1.13.0

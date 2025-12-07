@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  ig2rss:
+    build: .
+    container_name: ig2rss
+    restart: unless-stopped
+    
+    # Environment variables - configure your Instagram credentials
+    environment:
+      # Required: Instagram credentials
+      INSTAGRAM_USERNAME: ${INSTAGRAM_USERNAME}
+      INSTAGRAM_PASSWORD: ${INSTAGRAM_PASSWORD}
+      
+      # Optional: HTTP server configuration
+      BASE_URL: ${BASE_URL:-http://localhost:8080}
+      HOST: 0.0.0.0
+      PORT: 8080
+      
+      # Optional: Polling configuration (seconds)
+      POLL_INTERVAL: ${POLL_INTERVAL:-600}
+      
+      # Optional: RSS feed configuration
+      RSS_FEED_LIMIT: ${RSS_FEED_LIMIT:-50}
+      RSS_FEED_DAYS: ${RSS_FEED_DAYS:-30}
+      
+      # Optional: Storage paths (inside container)
+      DATABASE_PATH: /data/ig2rss.db
+      MEDIA_CACHE_PATH: /data/media
+      SESSION_FILE: /data/instagram_session.json
+      
+      # Optional: Logging level
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    
+    # Ports
+    ports:
+      - "8080:8080"
+    
+    # Volumes - persist database and media files
+    volumes:
+      - ig2rss-data:/data
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  ig2rss-data:
+    driver: local

@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+ROADMAP.md
+ARCHITECTURE.md
+DEPLOYMENT.md
+DEVELOPMENT.md
+PROJECT_REQUIREMENTS.md
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Data and logs
+data/
+*.log
+*.db
+
+# Test files
+tests/
+test-local.sh
+inspect-feed.sh
+
+# Development requirements
+requirements-dev.txt
+
+# Kubernetes
+k8s/
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
