@@ -57,11 +57,15 @@ class Config:
         # Validate TOTP seed format if provided
         if cls.INSTAGRAM_2FA_SEED:
             import re
-            # Base32 alphabet is A-Z and 2-7
-            if not re.match(r'^[A-Z2-7\s\-]+$', cls.INSTAGRAM_2FA_SEED.upper()):
+            # Remove whitespace for validation
+            seed_clean = re.sub(r'\s+', '', cls.INSTAGRAM_2FA_SEED)
+            # Base32 alphabet is A-Z and 2-7, also allow hex (0-9, a-f, A-F)
+            # We support both formats now
+            if not re.match(r'^[A-Z2-7\-_]+$', seed_clean.upper()) and \
+               not re.match(r'^[0-9a-fA-F]+$', seed_clean):
                 errors.append(
-                    "INSTAGRAM_2FA_SEED must be a valid base32 string (A-Z and 2-7 only). "
-                    "Spaces and hyphens are allowed but will be removed."
+                    "INSTAGRAM_2FA_SEED must be either base32 (A-Z and 2-7) or hex-encoded (0-9, A-F). "
+                    "Spaces, tabs, hyphens and underscores will be automatically removed."
                 )
 
         if cls.POLL_INTERVAL < 60:

@@ -135,7 +135,7 @@ class TestInstagramClientLogin:
     def test_login_with_2fa(self, mock_client):
         """Test successful login with 2FA."""
         # Create client with TOTP seed
-        client = InstagramClient("test_user", "test_pass", totp_seed="TEST_SEED_1234567890")
+        client = InstagramClient("test_user", "test_pass", totp_seed="JBSWY3DPEHPK3PXP")
         
         # Mock totp_generate_code
         client.client.totp_generate_code = Mock(return_value="123456")
@@ -145,9 +145,26 @@ class TestInstagramClientLogin:
         
         assert result is True
         assert client._is_authenticated is True
-        # Verify TOTP code was generated
-        client.client.totp_generate_code.assert_called_once_with("TEST_SEED_1234567890")
+        # Verify TOTP code was generated with cleaned seed (uppercase, no spaces)
+        client.client.totp_generate_code.assert_called_once_with("JBSWY3DPEHPK3PXP")
         # Verify login was called with verification code
+        client.client.login.assert_called_once_with("test_user", "test_pass", verification_code="123456")
+    
+    def test_login_with_2fa_spaces_in_seed(self, mock_client):
+        """Test successful login with 2FA when seed contains spaces."""
+        # Create client with TOTP seed containing spaces/tabs
+        client = InstagramClient("test_user", "test_pass", totp_seed="JBSW Y3DP EHPK 3PXP")
+        
+        # Mock totp_generate_code
+        client.client.totp_generate_code = Mock(return_value="123456")
+        client.client.login = Mock(return_value=True)
+        
+        result = client.login()
+        
+        assert result is True
+        assert client._is_authenticated is True
+        # Verify spaces were removed from seed
+        client.client.totp_generate_code.assert_called_once_with("JBSWY3DPEHPK3PXP")
         client.client.login.assert_called_once_with("test_user", "test_pass", verification_code="123456")
     
     def test_login_already_authenticated(self, instagram_client):
@@ -191,13 +208,13 @@ class TestInstagramClientLogin:
             username="test_user",
             password="test_pass",
             session_file="/tmp/session.json",
-            totp_seed="TEST_SEED_1234567890"
+            totp_seed="JBSWY3DPEHPK3PXP"
         )
         
         assert client.username == "test_user"
         assert client.password == "test_pass"
         assert client.session_file == "/tmp/session.json"
-        assert client.totp_seed == "TEST_SEED_1234567890"
+        assert client.totp_seed == "JBSWY3DPEHPK3PXP"
         assert not client._is_authenticated
 
 
