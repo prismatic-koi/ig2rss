@@ -272,7 +272,7 @@ class InstagramClient:
             seen_ids = set()  # Track post IDs to avoid duplicates
             max_id = None
             page_count = 0
-            max_pages = 10  # Safety limit to prevent infinite loops
+            max_pages = 5  # Limit scrolling - most valuable posts are in first 2 pages
             
             # Keep fetching pages until we have enough posts or no more pages
             while len(posts) < count and page_count < max_pages:

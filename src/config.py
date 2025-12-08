@@ -19,7 +19,7 @@ class Config:
     INSTAGRAM_2FA_SEED: Optional[str] = os.getenv("INSTAGRAM_2FA_SEED", None)
 
     # Polling configuration
-    POLL_INTERVAL: int = int(os.getenv("POLL_INTERVAL", "600"))  # seconds (10 min)
+    POLL_INTERVAL: int = int(os.getenv("POLL_INTERVAL", "1200"))  # seconds (20 min)
     FETCH_COUNT: int = int(os.getenv("FETCH_COUNT", "20"))  # posts per poll
 
     # RSS feed configuration
