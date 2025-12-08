@@ -201,11 +201,12 @@ class TestRSSGenerator:
         """Test description formatting with image."""
         description = generator._format_description(sample_post)
         
-        # First media item is skipped (it's in the enclosure)
-        # So a single-media post should NOT have the image in description
-        assert '<img' not in description
+        # Images are included in description (even the first one)
+        # because Miniflux shows image enclosures as downloads, not inline
+        assert '<img src="https://example.com/media/12345/0.jpg"' in description
+        assert 'style="max-width:100%;height:auto;"' in description
         
-        # Check caption is still present
+        # Check caption is present
         assert 'Test caption<br/>Second line' in description
         
         # Check Instagram link
@@ -218,8 +219,8 @@ class TestRSSGenerator:
         
         description = generator._format_description(sample_post)
         
-        # First media item is skipped (it's in the enclosure)
-        # So a single-media post should NOT have the video in description
+        # First video is skipped (it's in the enclosure and displays inline)
+        # So a single-video post should NOT have the video in description
         assert '<video' not in description
         
         # Check caption is still present
@@ -247,13 +248,12 @@ class TestRSSGenerator:
         
         description = generator._format_description(sample_post)
         
-        # First media item is skipped (it's in the enclosure)
-        # So carousel should have N-1 media items in description
-        assert description.count('<img') == 1  # Only second image
+        # All images are included (even first), videos after first are included
+        assert description.count('<img') == 2  # Both images
         assert description.count('<video') == 1  # Third item (video)
-        assert '12345/0.jpg' not in description  # First is skipped
-        assert '12345/1.jpg' in description  # Second is included
-        assert '12345/2.mp4' in description  # Third is included
+        assert '12345/0.jpg' in description  # First image included
+        assert '12345/1.jpg' in description  # Second image included
+        assert '12345/2.mp4' in description  # Third video included
     
     def test_format_description_no_local_path(self, generator, sample_post):
         """Test description uses Instagram URL when no local path."""
@@ -287,7 +287,8 @@ class TestRSSGenerator:
         
         description = generator._format_description(sample_post)
         
-        # First media is skipped, so single-media post has no image in description
+        # Images are included in description
+        assert '<img' in description
         # Should still have Instagram link
         assert 'View on Instagram' in description
     

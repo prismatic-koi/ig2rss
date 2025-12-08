@@ -197,8 +197,8 @@ class RSSGenerator:
     def _format_description(self, post: Dict[str, Any]) -> str:
         """Format post description with embedded media and caption.
         
-        Note: We skip the first media item since it's already in the RSS enclosure.
-        This prevents duplicate display in RSS readers like Miniflux.
+        Note: We skip the first VIDEO to avoid duplication (videos display inline from enclosure).
+        We include all IMAGES because Miniflux shows image enclosures as downloads, not inline.
         
         Args:
             post: Post dictionary from StorageManager
@@ -208,14 +208,16 @@ class RSSGenerator:
         """
         html_parts = []
         
-        # Add media (images/videos) - SKIP FIRST ONE (it's in the enclosure)
+        # Add media (images/videos)
         media_items = post.get('media', [])
         for idx, media in enumerate(media_items):
-            # Skip the first media item to avoid duplication with enclosure
-            if idx == 0:
+            media_type = media['media_type']
+            
+            # Skip first video (it's in enclosure and displays inline in Miniflux)
+            # But keep all images (enclosures show as downloads in Miniflux)
+            if idx == 0 and media_type == 'video':
                 continue
                 
-            media_type = media['media_type']
             local_path = media.get('local_path')
             
             if local_path:
