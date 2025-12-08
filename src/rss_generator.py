@@ -57,6 +57,14 @@ class RSSGenerator:
         ET.SubElement(channel, 'link').text = self.base_url
         ET.SubElement(channel, 'description').text = self.channel_description
         
+        # Add channel image
+        image = ET.SubElement(channel, 'image')
+        ET.SubElement(image, 'url').text = f"{self.base_url}/icon.webp"
+        ET.SubElement(image, 'title').text = self.channel_title
+        ET.SubElement(image, 'link').text = self.base_url
+        ET.SubElement(image, 'width').text = '48'
+        ET.SubElement(image, 'height').text = '48'
+        
         # Add atom:link for self-reference
         atom_link = ET.SubElement(channel, '{http://www.w3.org/2005/Atom}link')
         atom_link.set('href', f"{self.base_url}/feed.rss")

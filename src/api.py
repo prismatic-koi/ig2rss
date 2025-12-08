@@ -164,11 +164,32 @@ def register_routes(app: Flask):
             return jsonify({'error': 'File not found'}), 404
         
         # Determine mime type based on extension
-        mime_type = 'image/jpeg' if full_path.suffix.lower() in ['.jpg', '.jpeg'] else 'video/mp4'
+        ext = full_path.suffix.lower()
+        if ext in ['.jpg', '.jpeg']:
+            mime_type = 'image/jpeg'
+        elif ext == '.webp':
+            mime_type = 'image/webp'
+        else:
+            mime_type = 'video/mp4'
         
         logger.debug(f"Serving media: {media_path}")
         
         return send_file(full_path, mimetype=mime_type)
+    
+    @app.route('/icon.webp', methods=['GET'])
+    def serve_icon():
+        """Serve feed icon.
+        
+        Returns the icon.webp file from assets folder.
+        """
+        # Icon is in assets folder
+        icon_path = Path(__file__).parent.parent / 'assets' / 'icon.webp'
+        
+        if not icon_path.is_file():
+            logger.warning("Feed icon not found")
+            return jsonify({'error': 'Icon not found'}), 404
+        
+        return send_file(icon_path, mimetype='image/webp')
     
     @app.route('/', methods=['GET'])
     def index():
