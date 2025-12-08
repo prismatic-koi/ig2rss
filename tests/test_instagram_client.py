@@ -229,7 +229,22 @@ class TestInstagramClientGetTimelineFeed:
         feed_response = create_feed_response([{"pk": str(i)} for i in range(5)])
         instagram_client.client.get_timeline_feed = Mock(return_value=feed_response)
         
-        with patch("src.instagram_client.extract_media_v1", return_value=mock_media_photo):
+        # Create unique media objects with different IDs to avoid deduplication
+        media_objects = []
+        for i in range(5):
+            media = Mock()
+            media.pk = f"1234567890123456{i}"
+            media.media_type = 1
+            media.taken_at = datetime(2024, 1, 15, 12, 0, 0)
+            media.caption_text = "Test photo caption"
+            media.code = "ABC123"
+            media.thumbnail_url = "https://instagram.com/photo.jpg"
+            media.user = Mock()
+            media.user.username = "test_author"
+            media.user.full_name = "Test Author"
+            media_objects.append(media)
+        
+        with patch("src.instagram_client.extract_media_v1", side_effect=media_objects):
             posts = instagram_client.get_timeline_feed(count=3)
         
         assert len(posts) == 3
