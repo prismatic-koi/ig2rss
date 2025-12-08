@@ -8,6 +8,8 @@ media files with proper error handling and retry logic.
 import logging
 import time
 import json
+import re
+import base64
 import requests
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
@@ -128,7 +130,6 @@ class InstagramClient:
                 try:
                     # Clean and validate the TOTP seed
                     # Remove ALL whitespace characters (spaces, tabs, newlines, etc.)
-                    import re
                     seed = re.sub(r'\s+', '', self.totp_seed.strip())
                     
                     # Remove common separators
@@ -144,7 +145,6 @@ class InstagramClient:
                     # If it contains lowercase or numbers > 7, it might be hex
                     if any(c in seed.lower() for c in '89abcdef'):
                         logger.info("TOTP seed appears to be hex-encoded, converting to base32")
-                        import base64
                         try:
                             hex_bytes = bytes.fromhex(seed)
                             seed = base64.b32encode(hex_bytes).decode('ascii').rstrip('=')
