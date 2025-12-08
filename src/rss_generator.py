@@ -111,6 +111,66 @@ class RSSGenerator:
         # Description - HTML content with media and caption
         description = self._format_description(post)
         ET.SubElement(item, 'description').text = description
+        
+        # Add enclosure for first video/image (RSS standard is one enclosure per item)
+        self._add_enclosure(item, post)
+    
+    def _add_enclosure(self, item: ET.Element, post: Dict[str, Any]):
+        """Add enclosure element for media (RSS standard for attachments).
+        
+        RSS 2.0 spec says one enclosure per item. We prioritize:
+        1. First video with local file
+        2. First image with local file
+        3. First media (fallback to Instagram URL)
+        
+        Args:
+            item: XML item element to add enclosure to
+            post: Post dictionary from StorageManager
+        """
+        media_items = post.get('media', [])
+        if not media_items:
+            return
+        
+        # Try to find first video with local path
+        selected_media = None
+        for media in media_items:
+            if media['media_type'] == 'video' and media.get('local_path'):
+                selected_media = media
+                break
+        
+        # Fallback to first image with local path
+        if not selected_media:
+            for media in media_items:
+                if media['media_type'] == 'image' and media.get('local_path'):
+                    selected_media = media
+                    break
+        
+        # Fallback to first media item
+        if not selected_media:
+            selected_media = media_items[0]
+        
+        # Build enclosure URL
+        if selected_media.get('local_path'):
+            media_url = f"{self.base_url}/media/{selected_media['local_path']}"
+        else:
+            media_url = selected_media['media_url']
+        
+        # Determine MIME type
+        if selected_media['media_type'] == 'video':
+            mime_type = 'video/mp4'
+        else:
+            mime_type = 'image/jpeg'
+        
+        # Get file size (required by RSS spec, use 0 if unknown)
+        file_size = selected_media.get('file_size', 0)
+        
+        # Add enclosure element
+        enclosure = ET.SubElement(item, 'enclosure')
+        enclosure.set('url', media_url)
+        enclosure.set('type', mime_type)
+        enclosure.set('length', str(file_size))
+        
+        logger.debug(f"Added enclosure: {mime_type} {file_size} bytes")
     
     def _extract_title(self, caption: Optional[str]) -> str:
         """Extract title from caption (first line or fallback).
@@ -175,6 +235,63 @@ class RSSGenerator:
         html_parts.append(f'<p><a href="{html.escape(post["permalink"])}">View on Instagram</a></p>')
         
         return '\n'.join(html_parts)
+    
+    def _add_enclosure(self, item: ET.Element, post: Dict[str, Any]):
+        """Add enclosure element for media (RSS standard for attachments).
+        
+        RSS 2.0 spec says one enclosure per item. We prioritize:
+        1. First video with local file
+        2. First image with local file
+        3. First media (fallback to Instagram URL)
+        
+        Args:
+            item: XML item element to add enclosure to
+            post: Post dictionary from StorageManager
+        """
+        media_items = post.get('media', [])
+        if not media_items:
+            return
+        
+        # Try to find first video with local path
+        selected_media = None
+        for media in media_items:
+            if media['media_type'] == 'video' and media.get('local_path'):
+                selected_media = media
+                break
+        
+        # Fallback to first image with local path
+        if not selected_media:
+            for media in media_items:
+                if media['media_type'] == 'image' and media.get('local_path'):
+                    selected_media = media
+                    break
+        
+        # Fallback to first media item
+        if not selected_media:
+            selected_media = media_items[0]
+        
+        # Build enclosure URL
+        if selected_media.get('local_path'):
+            media_url = f"{self.base_url}/media/{selected_media['local_path']}"
+        else:
+            media_url = selected_media['media_url']
+        
+        # Determine MIME type
+        if selected_media['media_type'] == 'video':
+            mime_type = 'video/mp4'
+        else:
+            mime_type = 'image/jpeg'
+        
+        # Get file size (required by RSS spec, use 0 if unknown)
+        file_size = selected_media.get('file_size', 0)
+        
+        # Add enclosure element
+        enclosure = ET.SubElement(item, 'enclosure')
+        enclosure.set('url', media_url)
+        enclosure.set('type', mime_type)
+        enclosure.set('length', str(file_size))
+        
+        logger.debug(f"Added enclosure: {mime_type} {file_size} bytes")
     
     def _format_rfc822(self, dt: datetime) -> str:
         """Format datetime as RFC 822 date (required for RSS 2.0).

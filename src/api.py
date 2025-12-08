@@ -252,7 +252,9 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                                         f.write(response.content)
                                     
                                     file_size = len(response.content)
-                                    storage.save_media(post.id, idx, media_url, media_type, str(local_path), file_size)
+                                    # Save relative path for URL generation (post_id/filename.ext)
+                                    relative_path = f"{post.id}/{local_path.name}"
+                                    storage.save_media(post.id, idx, media_url, media_type, relative_path, file_size)
                                     
                                     logger.debug(f"Downloaded media: {local_path}")
                                     
