@@ -45,17 +45,25 @@ class InstagramPost:
 class InstagramClient:
     """Client for interacting with Instagram API via instagrapi."""
     
-    def __init__(self, username: str, password: str, session_file: Optional[str] = None):
+    def __init__(
+        self, 
+        username: str, 
+        password: str, 
+        session_file: Optional[str] = None,
+        totp_seed: Optional[str] = None
+    ):
         """Initialize Instagram client with credentials.
         
         Args:
             username: Instagram username
             password: Instagram password
             session_file: Path to session file for persistence (optional)
+            totp_seed: TOTP seed for 2FA authentication (optional)
         """
         self.username = username
         self.password = password
         self.session_file = session_file
+        self.totp_seed = totp_seed
         self.client = Client()
         self._is_authenticated = False
         
@@ -68,6 +76,8 @@ class InstagramClient:
         self.base_backoff = 2  # seconds
         
         logger.info(f"InstagramClient initialized for user: {username}")
+        if totp_seed:
+            logger.info("2FA TOTP seed provided for authentication")
     
     def login(self) -> bool:
         """Authenticate with Instagram using session or credentials.
@@ -112,7 +122,14 @@ class InstagramClient:
         logger.info(f"Attempting to log in as {self.username}")
         
         try:
-            self.client.login(self.username, self.password)
+            # Generate 2FA code if TOTP seed is provided
+            verification_code = None
+            if self.totp_seed:
+                verification_code = self.client.totp_generate_code(self.totp_seed)
+                logger.info("Generated 2FA verification code from TOTP seed")
+            
+            # Login with optional 2FA code
+            self.client.login(self.username, self.password, verification_code=verification_code)
             self._is_authenticated = True
             
             # Save session for future use

@@ -218,7 +218,8 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                 client = InstagramClient(
                     username=config.INSTAGRAM_USERNAME,
                     password=config.INSTAGRAM_PASSWORD,
-                    session_file=config.SESSION_FILE
+                    session_file=config.SESSION_FILE,
+                    totp_seed=config.INSTAGRAM_2FA_SEED
                 )
                 
                 # Login

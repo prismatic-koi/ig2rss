@@ -70,6 +70,57 @@ requests>=2.31.0
 
 Create `.env` file for local development (note: add to .gitignore!)
 
+```bash
+cp .env.example .env
+# Edit .env with your credentials
+```
+
+**Required Configuration**:
+- `INSTAGRAM_USERNAME`: Your Instagram username
+- `INSTAGRAM_PASSWORD`: Your Instagram password
+
+**Optional 2FA Configuration**:
+If your Instagram account has Two-Factor Authentication (2FA) enabled via an authenticator app (like Google Authenticator), you need to provide the TOTP seed:
+
+```bash
+# In your .env file
+INSTAGRAM_2FA_SEED=YOUR_TOTP_SEED_HERE
+```
+
+**How to get your TOTP seed**:
+
+Option 1 - During Instagram 2FA setup:
+1. Go to Instagram Settings > Security > Two-Factor Authentication
+2. When setting up authenticator app, Instagram shows a secret key
+3. Use this key as your `INSTAGRAM_2FA_SEED`
+
+Option 2 - Using instagrapi to generate and enable 2FA:
+```python
+from instagrapi import Client
+
+cl = Client()
+cl.login(USERNAME, PASSWORD)
+
+# Generate a new TOTP seed
+seed = cl.totp_generate_seed()
+print(f"TOTP Seed: {seed}")
+# Save this seed to your .env as INSTAGRAM_2FA_SEED
+
+# Generate a code to enable 2FA
+code = cl.totp_generate_code(seed)
+print(f"Code to enable: {code}")
+
+# Enable 2FA with this code (save backup codes!)
+backup_codes = cl.totp_enable(code)
+print(f"Backup codes (SAVE THESE!): {backup_codes}")
+```
+
+**Important Notes**:
+- The TOTP seed is NOT your 2FA backup codes
+- The seed is the secret key used to generate time-based codes
+- If you already have 2FA enabled, you may need to disable and re-enable it to get the seed
+- SMS-based 2FA is not supported - you must use an authenticator app
+
 ### 5. Create Data Directory
 
 ```bash
@@ -292,6 +343,23 @@ Ensure virtual environment is activated and dependencies installed.
 
 ### Instagram Login Fails
 Check credentials, 2FA settings, and Instagram account status.
+
+**Common issues**:
+- Invalid credentials: Double-check username and password
+- 2FA required: If you have 2FA enabled on Instagram, you MUST provide `INSTAGRAM_2FA_SEED` in your `.env` file
+- ChallengeRequired error: Instagram may require email/SMS verification. This usually happens with new accounts or suspicious activity
+- Rate limiting: Instagram may temporarily block login attempts if you try too many times
+
+**2FA Troubleshooting**:
+- Make sure you're using the TOTP seed (secret key), not a backup code
+- Verify the seed is correct by generating a code manually:
+  ```python
+  from instagrapi import Client
+  cl = Client()
+  code = cl.totp_generate_code("YOUR_SEED_HERE")
+  print(code)  # Compare with your authenticator app
+  ```
+- If codes don't match, you may need to re-enable 2FA to get a fresh seed
 
 ### Database Locked
 Close all connections to the database file.

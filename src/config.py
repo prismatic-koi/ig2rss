@@ -14,6 +14,9 @@ class Config:
     # Instagram credentials (required)
     INSTAGRAM_USERNAME: str = os.getenv("INSTAGRAM_USERNAME", "")
     INSTAGRAM_PASSWORD: str = os.getenv("INSTAGRAM_PASSWORD", "")
+    
+    # Two-Factor Authentication (optional)
+    INSTAGRAM_2FA_SEED: Optional[str] = os.getenv("INSTAGRAM_2FA_SEED", None)
 
     # Polling configuration
     POLL_INTERVAL: int = int(os.getenv("POLL_INTERVAL", "600"))  # seconds (10 min)

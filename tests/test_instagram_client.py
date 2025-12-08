@@ -130,7 +130,25 @@ class TestInstagramClientLogin:
         
         assert result is True
         assert instagram_client._is_authenticated is True
-        instagram_client.client.login.assert_called_once_with("test_user", "test_pass")
+        instagram_client.client.login.assert_called_once_with("test_user", "test_pass", verification_code=None)
+    
+    def test_login_with_2fa(self, mock_client):
+        """Test successful login with 2FA."""
+        # Create client with TOTP seed
+        client = InstagramClient("test_user", "test_pass", totp_seed="TEST_SEED_1234567890")
+        
+        # Mock totp_generate_code
+        client.client.totp_generate_code = Mock(return_value="123456")
+        client.client.login = Mock(return_value=True)
+        
+        result = client.login()
+        
+        assert result is True
+        assert client._is_authenticated is True
+        # Verify TOTP code was generated
+        client.client.totp_generate_code.assert_called_once_with("TEST_SEED_1234567890")
+        # Verify login was called with verification code
+        client.client.login.assert_called_once_with("test_user", "test_pass", verification_code="123456")
     
     def test_login_already_authenticated(self, instagram_client):
         """Test login when already authenticated skips re-authentication."""
@@ -166,6 +184,21 @@ class TestInstagramClientLogin:
         
         with pytest.raises(RuntimeError):
             instagram_client.login()
+    
+    def test_init_with_totp_seed(self, mock_client):
+        """Test initialization with TOTP seed."""
+        client = InstagramClient(
+            username="test_user",
+            password="test_pass",
+            session_file="/tmp/session.json",
+            totp_seed="TEST_SEED_1234567890"
+        )
+        
+        assert client.username == "test_user"
+        assert client.password == "test_pass"
+        assert client.session_file == "/tmp/session.json"
+        assert client.totp_seed == "TEST_SEED_1234567890"
+        assert not client._is_authenticated
 
 
 class TestInstagramClientGetTimelineFeed:
