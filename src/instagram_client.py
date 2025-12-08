@@ -209,6 +209,7 @@ class InstagramClient:
         
         def _fetch():
             posts = []
+            seen_ids = set()  # Track post IDs to avoid duplicates
             max_id = None
             page_count = 0
             max_pages = 10  # Safety limit to prevent infinite loops
@@ -264,6 +265,12 @@ class InstagramClient:
                         
                         post = self._convert_media_to_post(media)
                         if post:
+                            # Skip if we've already seen this post ID in this fetch
+                            if post.id in seen_ids:
+                                logger.debug(f"Skipping duplicate post within fetch: {post.id}")
+                                continue
+                            
+                            seen_ids.add(post.id)
                             posts.append(post)
                             page_posts_added += 1
                             logger.info(f"✅ FETCHED POST from @{post.author_username} (id: {post.id})")
