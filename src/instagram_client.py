@@ -125,8 +125,49 @@ class InstagramClient:
             # Generate 2FA code if TOTP seed is provided
             verification_code = None
             if self.totp_seed:
-                verification_code = self.client.totp_generate_code(self.totp_seed)
-                logger.info("Generated 2FA verification code from TOTP seed")
+                try:
+                    # Clean and validate the TOTP seed
+                    # Remove ALL whitespace characters (spaces, tabs, newlines, etc.)
+                    import re
+                    seed = re.sub(r'\s+', '', self.totp_seed.strip())
+                    
+                    # Remove common separators
+                    seed = seed.replace("-", "").replace("_", "")
+                    
+                    # Log the cleaned seed info for debugging (first/last few chars only)
+                    logger.debug(
+                        f"TOTP seed after cleaning: length={len(seed)}, "
+                        f"preview={seed[:4]}...{seed[-4:] if len(seed) > 8 else ''}"
+                    )
+                    
+                    # Try to detect if it's a hex-encoded secret (some apps use this)
+                    # If it contains lowercase or numbers > 7, it might be hex
+                    if any(c in seed.lower() for c in '89abcdef'):
+                        logger.info("TOTP seed appears to be hex-encoded, converting to base32")
+                        import base64
+                        try:
+                            hex_bytes = bytes.fromhex(seed)
+                            seed = base64.b32encode(hex_bytes).decode('ascii').rstrip('=')
+                            logger.debug(f"Converted to base32: length={len(seed)}")
+                        except ValueError:
+                            logger.debug("Failed to parse as hex, treating as base32")
+                    
+                    # Ensure uppercase for base32
+                    seed = seed.upper()
+                    
+                    verification_code = self.client.totp_generate_code(seed)
+                    logger.info("Generated 2FA verification code from TOTP seed")
+                except Exception as e:
+                    logger.error(
+                        f"Failed to generate 2FA code from TOTP seed: {e}. "
+                        f"Original seed length: {len(self.totp_seed)}, "
+                        f"contains spaces/tabs: {any(c in self.totp_seed for c in ' \t\n\r')}"
+                    )
+                    raise ValueError(
+                        f"Invalid TOTP seed format: {e}. "
+                        "The seed should be base32 (A-Z, 2-7) or hex-encoded. "
+                        "Make sure to remove any quotes around the seed in your .env file."
+                    ) from e
             
             # Login with optional 2FA code
             self.client.login(self.username, self.password, verification_code=verification_code)

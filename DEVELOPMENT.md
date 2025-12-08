@@ -87,6 +87,12 @@ If your Instagram account has Two-Factor Authentication (2FA) enabled via an aut
 INSTAGRAM_2FA_SEED=YOUR_TOTP_SEED_HERE
 ```
 
+**TOTP Seed Format**:
+- Must be a base32-encoded string (contains only A-Z and 2-7)
+- Typically 16 or 32 characters long
+- Spaces and hyphens are automatically removed
+- Example: `JBSWY3DPEHPK3PXP` or `JBSW Y3DP EHPK 3PXP`
+
 **How to get your TOTP seed**:
 
 Option 1 - During Instagram 2FA setup:

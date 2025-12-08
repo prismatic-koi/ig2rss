@@ -53,6 +53,16 @@ class Config:
 
         if not cls.INSTAGRAM_PASSWORD:
             errors.append("INSTAGRAM_PASSWORD environment variable is required")
+        
+        # Validate TOTP seed format if provided
+        if cls.INSTAGRAM_2FA_SEED:
+            import re
+            # Base32 alphabet is A-Z and 2-7
+            if not re.match(r'^[A-Z2-7\s\-]+$', cls.INSTAGRAM_2FA_SEED.upper()):
+                errors.append(
+                    "INSTAGRAM_2FA_SEED must be a valid base32 string (A-Z and 2-7 only). "
+                    "Spaces and hyphens are allowed but will be removed."
+                )
 
         if cls.POLL_INTERVAL < 60:
             errors.append("POLL_INTERVAL must be at least 60 seconds")
