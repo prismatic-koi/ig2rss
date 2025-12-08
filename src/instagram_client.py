@@ -158,10 +158,12 @@ class InstagramClient:
                     verification_code = self.client.totp_generate_code(seed)
                     logger.info("Generated 2FA verification code from TOTP seed")
                 except Exception as e:
+                    whitespace_chars = ' \t\n\r'
+                    has_whitespace = any(c in self.totp_seed for c in whitespace_chars)
                     logger.error(
                         f"Failed to generate 2FA code from TOTP seed: {e}. "
                         f"Original seed length: {len(self.totp_seed)}, "
-                        f"contains spaces/tabs: {any(c in self.totp_seed for c in ' \t\n\r')}"
+                        f"contains spaces/tabs: {has_whitespace}"
                     )
                     raise ValueError(
                         f"Invalid TOTP seed format: {e}. "
