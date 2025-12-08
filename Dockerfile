@@ -34,8 +34,8 @@ ENV INSTAGRAM_USERNAME=test_user
 ENV INSTAGRAM_PASSWORD=test_pass
 ENV PYTHONPATH=/app
 
-# Run tests
-RUN pytest tests/ -v --cov=src --cov-report=term-missing
+# Run tests with python -m to ensure proper path handling
+RUN python -m pytest tests/ -v --cov=src --cov-report=term-missing
 
 # Stage 3: Runtime
 FROM python:3.11-slim
