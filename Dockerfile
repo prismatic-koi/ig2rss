@@ -58,8 +58,9 @@ RUN useradd -m -u 1000 -s /bin/bash ig2rss
 # Set working directory
 WORKDIR /app
 
-# Copy application code
+# Copy application code and assets
 COPY src/ /app/src/
+COPY assets/ /app/assets/
 
 # Create data directory with correct permissions
 RUN mkdir -p /data && \
