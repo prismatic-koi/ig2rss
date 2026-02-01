@@ -13,8 +13,18 @@
 Added three new tables to support smart polling:
 
 - **`following_accounts`**: Caches the list of accounts you follow (24-hour TTL)
+  - Primary source of truth for which accounts to track
+  - Refreshed periodically via Instagram API
+  - Used to detect new follows/unfollows
+  
 - **`account_activity`**: Tracks posting activity and poll priority for each account
+  - Stores polling metadata (priority, last checked, consecutive no-posts)
+  - Synced with `following_accounts` on each cycle
+  - Keeps historical data for unfollowed accounts
+  
 - **`sync_metadata`**: Stores sync cycle counter and initialization state
+
+**Relationship**: `following_accounts` is the source list, `account_activity` stores polling state. Regular syncs check `following_accounts` (with caching) to detect new follows, then query `account_activity` for polling decisions.
 
 All tables are **additive only** - existing `posts` and `media` tables remain unchanged.
 

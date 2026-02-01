@@ -9,6 +9,7 @@ import logging
 import time
 from pathlib import Path
 from typing import Optional, Type
+from datetime import datetime
 
 from flask import Flask, Response, request, jsonify, send_file
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -331,6 +332,13 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
         # Regular sync (not first time)
         polling_manager.increment_cycle()
         
+        # Refresh following list (respects cache TTL)
+        following_accounts = following_manager.get_following_list()
+        logger.debug(f"Following {len(following_accounts)} accounts (from cache)")
+        
+        # Sync account_activity with following list (add new follows, keep orphaned for now)
+        _sync_following_with_activity(storage, following_accounts, polling_manager)
+        
         # Get accounts to poll this cycle
         accounts_to_poll = polling_manager.get_accounts_to_poll_this_cycle(
             max_accounts=config.MAX_ACCOUNTS_TO_FETCH if config.MAX_ACCOUNTS_TO_FETCH > 0 else None
@@ -403,6 +411,39 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
         for priority, count in stats['distribution'].items():
             logger.info(f"      {priority}: {count} accounts")
         logger.info("=" * 70)
+    
+    def _sync_following_with_activity(storage: StorageManager, following_accounts, polling_manager):
+        """Sync following list with account_activity table.
+        
+        Adds newly followed accounts to account_activity.
+        Keeps unfollowed accounts for historical data (can be cleaned up separately).
+        """
+        existing_activities = {a['user_id']: a for a in storage.get_all_account_activity()}
+        following_user_ids = {acc.user_id for acc in following_accounts}
+        
+        # Add new follows
+        new_follows = [acc for acc in following_accounts if acc.user_id not in existing_activities]
+        
+        if new_follows:
+            logger.info(f"Found {len(new_follows)} newly followed accounts, adding to tracking...")
+            for account in new_follows:
+                # Initialize with conservative priority
+                storage.save_account_activity(
+                    user_id=account.user_id,
+                    username=account.username,
+                    media_count=0,
+                    last_post_id=None,
+                    last_post_date=None,
+                    last_checked=datetime.now(),
+                    poll_priority='normal',  # Start as normal, will refine
+                    consecutive_no_new_posts=0
+                )
+                logger.info(f"Added newly followed account: @{account.username}")
+        
+        # Optional: Log unfollowed accounts (but keep them for historical data)
+        unfollowed = [uid for uid in existing_activities if uid not in following_user_ids]
+        if unfollowed:
+            logger.debug(f"{len(unfollowed)} accounts in activity table are no longer followed (keeping for history)")
     
     def _download_post_media(post, storage: StorageManager):
         """Download media for a post."""
