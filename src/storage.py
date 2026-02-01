@@ -445,6 +445,9 @@ class StorageManager:
     def save_following_accounts(self, accounts: List[Dict[str, Any]]) -> bool:
         """Save or update following accounts list.
         
+        Replaces the entire following list with the provided accounts.
+        Accounts not in the list will be removed.
+        
         Args:
             accounts: List of account dicts with keys: user_id, username, full_name, is_private
             
@@ -455,10 +458,13 @@ class StorageManager:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 
+                # Clear existing following accounts first (full replace)
+                cursor.execute("DELETE FROM following_accounts")
+                
                 now = datetime.now()
                 for account in accounts:
                     cursor.execute("""
-                        INSERT OR REPLACE INTO following_accounts 
+                        INSERT INTO following_accounts 
                         (user_id, username, full_name, is_private, last_checked, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?)
                     """, (
@@ -517,6 +523,9 @@ class StorageManager:
                 last_checked = row['last_checked'] if row else None
                 
                 if last_checked:
+                    # Handle both datetime and string types
+                    if isinstance(last_checked, str):
+                        last_checked = datetime.fromisoformat(last_checked)
                     return datetime.now() - last_checked
                 return None
                 
