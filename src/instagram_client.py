@@ -493,6 +493,74 @@ class InstagramClient:
             logger.error(f"Failed to download media from {url}: {e}")
             return False
     
+    def _fetch_user_medias_with_fix(
+        self, 
+        user_id: str, 
+        amount: int = 20
+    ) -> List:
+        """Fetch user medias with Pydantic validation fixes applied.
+        
+        This method uses the low-level private API to get raw JSON,
+        applies fixes for common Pydantic validation issues, then
+        converts to Media objects.
+        
+        Args:
+            user_id: Instagram user ID (pk)
+            amount: Number of media items to fetch
+            
+        Returns:
+            List of instagrapi Media objects
+        """
+        from instagrapi.extractors import extract_media_v1
+        
+        try:
+            # Use low-level API to get raw JSON
+            items = self.client.private_request(
+                f"feed/user/{user_id}/",
+                params={
+                    "count": amount,
+                    "rank_token": self.client.rank_token,
+                    "ranked_content": "true",
+                },
+            )["items"]
+            
+            medias = []
+            for media_data in items:
+                try:
+                    # Apply Pydantic fixes before extraction
+                    
+                    # Fix 1: clips_metadata.original_sound_info.audio_filter_infos
+                    if "clips_metadata" in media_data:
+                        clips = media_data.get("clips_metadata", {})
+                        if isinstance(clips, dict) and "original_sound_info" in clips:
+                            sound_info = clips.get("original_sound_info", {})
+                            if isinstance(sound_info, dict) and sound_info.get("audio_filter_infos") is None:
+                                sound_info["audio_filter_infos"] = []
+                    
+                    # Fix 2: image_versions2.candidates.scans_profile
+                    if "image_versions2" in media_data:
+                        image_versions = media_data.get("image_versions2", {})
+                        if isinstance(image_versions, dict) and "candidates" in image_versions:
+                            candidates = image_versions.get("candidates", [])
+                            if isinstance(candidates, list):
+                                for candidate in candidates:
+                                    if isinstance(candidate, dict) and candidate.get("scans_profile") is None:
+                                        candidate["scans_profile"] = ""
+                    
+                    # Convert to Media object
+                    media = extract_media_v1(media_data)
+                    medias.append(media)
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to parse media item: {e}")
+                    continue
+            
+            return medias
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch user medias: {e}")
+            raise
+
     def check_account_for_new_posts(
         self, 
         user_id: str, 
@@ -548,9 +616,9 @@ class InstagramClient:
                 # Return empty but don't fail completely
                 return False, [], metadata
             
-            # Step 2: Fetch latest post only (amount=1)
+            # Step 2: Fetch latest post only (amount=1) with Pydantic fixes
             try:
-                latest_medias = self.client.user_medias(user_id, amount=1)
+                latest_medias = self._fetch_user_medias_with_fix(user_id, amount=1)
                 
                 if not latest_medias:
                     logger.debug(f"@{username} returned no posts, skipping")
@@ -564,7 +632,7 @@ class InstagramClient:
                 logger.debug(f"@{username} latest post: {latest_post_id} (date: {metadata['latest_post_date']})")
                 
             except Exception as e:
-                logger.error(f"Failed to fetch latest post for @{username}: {e}")
+                logger.error(f"Failed to fetch latest post for @{username}: {e}", exc_info=True)
                 return False, [], metadata
             
             # Step 3: Compare with last known post
@@ -576,7 +644,7 @@ class InstagramClient:
             logger.info(f"@{username} has new posts! Fetching recent content...")
             
             try:
-                recent_medias = self.client.user_medias(user_id, amount=20)
+                recent_medias = self._fetch_user_medias_with_fix(user_id, amount=20)
                 
                 posts = []
                 for media in recent_medias:
@@ -588,7 +656,7 @@ class InstagramClient:
                 return True, posts, metadata
                 
             except Exception as e:
-                logger.error(f"Failed to fetch recent posts for @{username}: {e}")
+                logger.error(f"Failed to fetch recent posts for @{username}: {e}", exc_info=True)
                 # Return the latest post data we have
                 return True, [], metadata
         
