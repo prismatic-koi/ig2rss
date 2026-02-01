@@ -113,6 +113,45 @@ class StorageManager:
                 )
             """)
             
+            # Following accounts cache (Phase 1: Smart Polling)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS following_accounts (
+                    user_id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    full_name TEXT,
+                    is_private BOOLEAN DEFAULT 0,
+                    last_checked TIMESTAMP NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Account activity tracking (Phase 1: Smart Polling)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS account_activity (
+                    user_id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    media_count INTEGER DEFAULT 0,
+                    last_post_id TEXT,
+                    last_post_date TIMESTAMP,
+                    last_checked TIMESTAMP NOT NULL,
+                    poll_priority TEXT DEFAULT 'normal',
+                    consecutive_no_new_posts INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES following_accounts(user_id)
+                )
+            """)
+            
+            # Sync metadata (Phase 1: Smart Polling)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sync_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
             # Create indexes for common queries
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_posts_posted_at 
@@ -127,6 +166,31 @@ class StorageManager:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_media_post_id 
                 ON media(post_id)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_following_username 
+                ON following_accounts(username)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_following_last_checked 
+                ON following_accounts(last_checked)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_activity_last_checked 
+                ON account_activity(last_checked)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_activity_priority 
+                ON account_activity(poll_priority)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_activity_last_post_date 
+                ON account_activity(last_post_date DESC)
             """)
             
             logger.info("Database schema initialized successfully")
@@ -373,3 +437,322 @@ class StorageManager:
         except Exception as e:
             logger.error(f"Failed to get stats: {e}")
             return {}
+    
+    # ============================================================================
+    # Following Accounts Methods (Phase 1: Smart Polling)
+    # ============================================================================
+    
+    def save_following_accounts(self, accounts: List[Dict[str, Any]]) -> bool:
+        """Save or update following accounts list.
+        
+        Args:
+            accounts: List of account dicts with keys: user_id, username, full_name, is_private
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                now = datetime.now()
+                for account in accounts:
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO following_accounts 
+                        (user_id, username, full_name, is_private, last_checked, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (
+                        account['user_id'],
+                        account['username'],
+                        account.get('full_name'),
+                        account.get('is_private', False),
+                        now,
+                        now
+                    ))
+                
+                logger.info(f"Saved {len(accounts)} following accounts")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to save following accounts: {e}")
+            return False
+    
+    def get_following_accounts(self) -> List[Dict[str, Any]]:
+        """Get all following accounts from cache.
+        
+        Returns:
+            List of account dictionaries
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT user_id, username, full_name, is_private, 
+                           last_checked, created_at, updated_at
+                    FROM following_accounts
+                    ORDER BY username
+                """)
+                accounts = [dict(row) for row in cursor.fetchall()]
+                logger.debug(f"Retrieved {len(accounts)} following accounts from cache")
+                return accounts
+                
+        except Exception as e:
+            logger.error(f"Failed to get following accounts: {e}")
+            return []
+    
+    def get_following_cache_age(self) -> Optional[timedelta]:
+        """Get age of following accounts cache.
+        
+        Returns:
+            timedelta since last cache update, or None if no cache exists
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT MAX(last_checked) as last_checked 
+                    FROM following_accounts
+                """)
+                row = cursor.fetchone()
+                last_checked = row['last_checked'] if row else None
+                
+                if last_checked:
+                    return datetime.now() - last_checked
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to get following cache age: {e}")
+            return None
+    
+    # ============================================================================
+    # Account Activity Methods (Phase 1: Smart Polling)
+    # ============================================================================
+    
+    def save_account_activity(self, user_id: str, username: str, **kwargs) -> bool:
+        """Save or update account activity data.
+        
+        Args:
+            user_id: Instagram user ID
+            username: Instagram username
+            **kwargs: Optional fields - media_count, last_post_id, last_post_date,
+                     last_checked, poll_priority, consecutive_no_new_posts
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                now = datetime.now()
+                cursor.execute("""
+                    INSERT OR REPLACE INTO account_activity 
+                    (user_id, username, media_count, last_post_id, last_post_date,
+                     last_checked, poll_priority, consecutive_no_new_posts, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    user_id,
+                    username,
+                    kwargs.get('media_count', 0),
+                    kwargs.get('last_post_id'),
+                    kwargs.get('last_post_date'),
+                    kwargs.get('last_checked', now),
+                    kwargs.get('poll_priority', 'normal'),
+                    kwargs.get('consecutive_no_new_posts', 0),
+                    now
+                ))
+                
+                logger.debug(f"Saved activity for {username} (priority={kwargs.get('poll_priority', 'normal')})")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to save activity for {username}: {e}")
+            return False
+    
+    def update_account_activity(self, user_id: str, **kwargs) -> bool:
+        """Update specific fields of an account activity record.
+        
+        Args:
+            user_id: Instagram user ID
+            **kwargs: Fields to update
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Build dynamic UPDATE query
+                update_fields = []
+                values = []
+                for key, value in kwargs.items():
+                    if key in ['media_count', 'last_post_id', 'last_post_date', 
+                              'last_checked', 'poll_priority', 'consecutive_no_new_posts']:
+                        update_fields.append(f"{key} = ?")
+                        values.append(value)
+                
+                if not update_fields:
+                    logger.warning(f"No valid fields to update for user {user_id}")
+                    return False
+                
+                update_fields.append("updated_at = ?")
+                values.append(datetime.now())
+                values.append(user_id)
+                
+                query = f"UPDATE account_activity SET {', '.join(update_fields)} WHERE user_id = ?"
+                cursor.execute(query, values)
+                
+                if cursor.rowcount == 0:
+                    logger.warning(f"No activity record found to update for user {user_id}")
+                    return False
+                
+                logger.debug(f"Updated activity for user {user_id}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to update activity for user {user_id}: {e}")
+            return False
+    
+    def get_account_activity(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get account activity data for a specific user.
+        
+        Args:
+            user_id: Instagram user ID
+            
+        Returns:
+            Activity dictionary or None if not found
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT * FROM account_activity WHERE user_id = ?
+                """, (user_id,))
+                row = cursor.fetchone()
+                return dict(row) if row else None
+                
+        except Exception as e:
+            logger.error(f"Failed to get activity for user {user_id}: {e}")
+            return None
+    
+    def get_all_account_activity(self) -> List[Dict[str, Any]]:
+        """Get all account activity records.
+        
+        Returns:
+            List of activity dictionaries
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT * FROM account_activity
+                    ORDER BY last_checked DESC
+                """)
+                activities = [dict(row) for row in cursor.fetchall()]
+                logger.debug(f"Retrieved {len(activities)} account activity records")
+                return activities
+                
+        except Exception as e:
+            logger.error(f"Failed to get all account activity: {e}")
+            return []
+    
+    def get_accounts_by_priority(self, priority: str) -> List[Dict[str, Any]]:
+        """Get all accounts with a specific priority level.
+        
+        Args:
+            priority: Priority level ('high', 'normal', 'low', 'dormant')
+            
+        Returns:
+            List of activity dictionaries
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT * FROM account_activity 
+                    WHERE poll_priority = ?
+                    ORDER BY last_checked ASC
+                """, (priority,))
+                accounts = [dict(row) for row in cursor.fetchall()]
+                logger.debug(f"Retrieved {len(accounts)} accounts with priority={priority}")
+                return accounts
+                
+        except Exception as e:
+            logger.error(f"Failed to get accounts by priority {priority}: {e}")
+            return []
+    
+    def get_priority_distribution(self) -> Dict[str, int]:
+        """Get count of accounts by priority level.
+        
+        Returns:
+            Dictionary mapping priority -> count
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT poll_priority, COUNT(*) as count
+                    FROM account_activity
+                    GROUP BY poll_priority
+                """)
+                distribution = {row['poll_priority']: row['count'] for row in cursor.fetchall()}
+                logger.debug(f"Priority distribution: {distribution}")
+                return distribution
+                
+        except Exception as e:
+            logger.error(f"Failed to get priority distribution: {e}")
+            return {}
+    
+    # ============================================================================
+    # Sync Metadata Methods (Phase 1: Smart Polling)
+    # ============================================================================
+    
+    def save_sync_metadata(self, key: str, value: str) -> bool:
+        """Save or update sync metadata.
+        
+        Args:
+            key: Metadata key
+            value: Metadata value (stored as string)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                """, (key, value, datetime.now()))
+                logger.debug(f"Saved sync metadata: {key}={value}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to save sync metadata {key}: {e}")
+            return False
+    
+    def get_sync_metadata(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Get sync metadata value.
+        
+        Args:
+            key: Metadata key
+            default: Default value if key not found
+            
+        Returns:
+            Metadata value or default
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT value FROM sync_metadata WHERE key = ?
+                """, (key,))
+                row = cursor.fetchone()
+                value = row['value'] if row else default
+                logger.debug(f"Retrieved sync metadata: {key}={value}")
+                return value
+                
+        except Exception as e:
+            logger.error(f"Failed to get sync metadata {key}: {e}")
+            return default

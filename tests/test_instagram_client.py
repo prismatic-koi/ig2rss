@@ -130,7 +130,8 @@ class TestInstagramClientLogin:
         
         assert result is True
         assert instagram_client._is_authenticated is True
-        instagram_client.client.login.assert_called_once_with("test_user", "test_pass", verification_code=None)
+        # Now we don't pass verification_code if it's None (changed in Phase 1C)
+        instagram_client.client.login.assert_called_once_with("test_user", "test_pass")
     
     def test_login_with_2fa(self, mock_client):
         """Test successful login with 2FA."""
