@@ -7,9 +7,8 @@ downloaded media files. It also manages background sync tasks.
 import os
 import logging
 import time
-import requests
 from pathlib import Path
-from typing import Optional, Type
+from typing import Optional, Type, List
 from datetime import datetime
 
 from flask import Flask, Response, request, jsonify, send_file
@@ -19,8 +18,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 from src.config import Config
 from src.storage import StorageManager
 from src.rss_generator import RSSGenerator
-from src.instagram_client import InstagramClient
-from src.following_manager import FollowingManager
+from src.instagram_client import InstagramClient, InstagramPost
+from src.following_manager import FollowingManager, FollowedAccount
 from src.account_polling_manager import AccountPollingManager
 
 logger = logging.getLogger(__name__)
@@ -282,6 +281,15 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                 following_accounts = following_accounts[:config.MAX_ACCOUNTS_TO_FETCH]
                 logger.info(f"⚠️  Testing mode: Limiting to {len(following_accounts)} accounts")
             
+            # CRITICAL: Save following accounts to DB BEFORE initializing activity profiles
+            # This ensures FK constraint is satisfied (account_activity references following_accounts)
+            storage.save_following_accounts([{
+                'user_id': acc.user_id,
+                'username': acc.username,
+                'full_name': acc.full_name,
+                'is_private': acc.is_private
+            } for acc in following_accounts])
+            
             logger.info(f"🔍 Fetching 1 post from each account to determine activity levels...")
             
             # Fetch 1 post from each account to determine priority
@@ -309,7 +317,7 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                         for post in posts:
                             if not storage.post_exists(post.id):
                                 storage.save_post(post)
-                                _download_post_media(post, storage)
+                                _download_post_media(post, storage, client)
                     
                     # Small delay between accounts
                     time.sleep(1)
@@ -417,7 +425,7 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                     for post in posts:
                         if not storage.post_exists(post.id):
                             storage.save_post(post)
-                            _download_post_media(post, storage)
+                            _download_post_media(post, storage, client)
                             total_new_posts += 1
                     
                     logger.info(f"✅ @{username}: {len(posts)} posts fetched")
@@ -454,7 +462,11 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
             logger.info(f"      {priority}: {count} accounts")
         logger.info("=" * 70)
     
-    def _sync_following_with_activity(storage: StorageManager, following_accounts, polling_manager):
+    def _sync_following_with_activity(
+        storage: StorageManager,
+        following_accounts: List[FollowedAccount],
+        polling_manager: AccountPollingManager
+    ):
         """Sync following list with account_activity table.
         
         Adds newly followed accounts to account_activity.
@@ -487,27 +499,31 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
         if unfollowed:
             logger.debug(f"{len(unfollowed)} accounts in activity table are no longer followed (keeping for history)")
     
-    def _download_post_media(post, storage: StorageManager):
-        """Download media for a post."""
+    def _download_post_media(post: InstagramPost, storage: StorageManager, client: InstagramClient):
+        """Download media for a post using client's retry logic.
+        
+        Args:
+            post: Instagram post with media to download
+            storage: Storage manager for saving media metadata
+            client: Instagram client with download_media method and retry logic
+        """
         for idx, (media_url, media_type) in enumerate(zip(post.media_urls, post.media_types)):
             try:
                 local_path = storage.get_media_path(post.id, idx, media_type)
                 
-                response = requests.get(media_url, timeout=30)
-                response.raise_for_status()
+                # Use client's download_media method which includes retry logic
+                if client.download_media(media_url, str(local_path)):
+                    file_size = local_path.stat().st_size
+                    relative_path = f"{post.id}/{local_path.name}"
+                    storage.save_media(post.id, idx, media_url, media_type, relative_path, file_size)
+                    logger.debug(f"Downloaded media: {local_path}")
+                else:
+                    logger.error(f"Failed to download media {media_url}")
                 
-                with open(local_path, 'wb') as f:
-                    f.write(response.content)
-                
-                file_size = len(response.content)
-                relative_path = f"{post.id}/{local_path.name}"
-                storage.save_media(post.id, idx, media_url, media_type, relative_path, file_size)
-                
-                logger.debug(f"Downloaded media: {local_path}")
                 time.sleep(0.5)
                 
             except Exception as e:
-                logger.error(f"Failed to download media {media_url}: {e}")
+                logger.error(f"Failed to download media for post {post.id}: {e}")
     
     def _legacy_timeline_sync(app: Flask, config: Type[Config]):
         """Legacy timeline-based sync (original behavior)."""
@@ -541,7 +557,7 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                 if storage.save_post(post):
                     new_count += 1
                     logger.info(f"💾 SAVED NEW POST from @{post.author_username} (id: {post.id})")
-                    _download_post_media(post, storage)
+                    _download_post_media(post, storage, client)
             else:
                 duplicate_count += 1
                 logger.info(f"⏭️  DUPLICATE (already in DB) from @{post.author_username} (id: {post.id})")
