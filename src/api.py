@@ -7,6 +7,7 @@ downloaded media files. It also manages background sync tasks.
 import os
 import logging
 import time
+import requests
 from pathlib import Path
 from typing import Optional, Type
 from datetime import datetime
@@ -265,6 +266,13 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
             logger.info("🚀 FIRST SYNC DETECTED - Initializing activity profiles...")
             logger.info("=" * 70)
             
+            # Prominent warning if account limiting is active
+            if config.MAX_ACCOUNTS_TO_FETCH > 0:
+                logger.warning("=" * 70)
+                logger.warning(f"⚠️  TESTING MODE: Limited to {config.MAX_ACCOUNTS_TO_FETCH} accounts")
+                logger.warning("⚠️  Set MAX_ACCOUNTS_TO_FETCH=0 for unlimited (production mode)")
+                logger.warning("=" * 70)
+            
             # Get following list
             following_accounts = following_manager.get_following_list()
             logger.info(f"📋 Following {len(following_accounts)} accounts")
@@ -307,7 +315,10 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                     time.sleep(1)
                     
                 except Exception as e:
-                    logger.error(f"Failed to check @{account.username}: {e}")
+                    logger.error(
+                        f"Failed to check @{account.username}: {e}",
+                        exc_info=True  # Include full traceback for debugging
+                    )
                     posts_by_account[account.username] = []
             
             # Initialize activity profiles
@@ -315,6 +326,27 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                 accounts=following_accounts,
                 posts_by_account=posts_by_account
             )
+            
+            # Check initialization success rate
+            successful_accounts = sum(1 for posts in posts_by_account.values() if posts)
+            total_accounts = len(following_accounts)
+            success_rate = successful_accounts / total_accounts if total_accounts > 0 else 0
+            
+            logger.info(
+                f"Initialization results: {successful_accounts}/{total_accounts} accounts "
+                f"succeeded ({success_rate:.1%})"
+            )
+            
+            # Only mark as initialized if we got reasonable success
+            if success_rate < 0.5:
+                logger.error("=" * 70)
+                logger.error(
+                    f"❌ Initialization failed: only {success_rate:.1%} of accounts "
+                    f"initialized successfully."
+                )
+                logger.error("Will retry initialization on next sync.")
+                logger.error("=" * 70)
+                return
             
             # Mark as initialized
             polling_manager.mark_initialized()
@@ -331,6 +363,13 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
         
         # Regular sync (not first time)
         polling_manager.increment_cycle()
+        
+        # Warn on every sync if limiting is active
+        if config.MAX_ACCOUNTS_TO_FETCH > 0:
+            logger.warning(
+                f"⚠️  Account limit active: MAX_ACCOUNTS_TO_FETCH={config.MAX_ACCOUNTS_TO_FETCH} "
+                f"(set to 0 for unlimited)"
+            )
         
         # Refresh following list (respects cache TTL)
         following_accounts = following_manager.get_following_list()
@@ -397,7 +436,10 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                 time.sleep(1)
                 
             except Exception as e:
-                logger.error(f"Failed to check @{activity['username']}: {e}")
+                logger.error(
+                    f"Failed to check @{activity['username']}: {e}",
+                    exc_info=True  # Include full traceback for debugging
+                )
         
         # Log summary
         stats = polling_manager.get_priority_stats()
@@ -447,8 +489,6 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
     
     def _download_post_media(post, storage: StorageManager):
         """Download media for a post."""
-        import requests
-        
         for idx, (media_url, media_type) in enumerate(zip(post.media_urls, post.media_types)):
             try:
                 local_path = storage.get_media_path(post.id, idx, media_type)
