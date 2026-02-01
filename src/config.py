@@ -48,6 +48,13 @@ class Config:
     PRIORITY_OVERRIDE_ACCOUNTS: List[str] = [
         u.strip() for u in os.getenv("PRIORITY_OVERRIDE_ACCOUNTS", "").split(",") if u.strip()
     ]
+    
+    # Story Polling (Phase 2)
+    STORY_POLLING_ENABLED: bool = os.getenv("STORY_POLLING_ENABLED", "true").lower() == "true"
+    STORY_ACTIVE_DAYS: int = int(os.getenv("STORY_ACTIVE_DAYS", "3"))
+    STORY_INACTIVE_DAYS: int = int(os.getenv("STORY_INACTIVE_DAYS", "14"))
+    STORY_DORMANT_DAYS: int = int(os.getenv("STORY_DORMANT_DAYS", "90"))
+    STORY_MUTE_REFRESH_HOURS: int = int(os.getenv("STORY_MUTE_REFRESH_HOURS", "24"))
 
     # RSS feed configuration
     RSS_FEED_LIMIT: int = int(os.getenv("RSS_FEED_LIMIT", "50"))
@@ -140,6 +147,19 @@ class Config:
         
         if cls.FOLLOWING_CACHE_HOURS < 1:
             errors.append("FOLLOWING_CACHE_HOURS must be at least 1")
+        
+        # Validate story polling config
+        if cls.STORY_ACTIVE_DAYS < 1:
+            errors.append("STORY_ACTIVE_DAYS must be at least 1")
+        
+        if cls.STORY_INACTIVE_DAYS < cls.STORY_ACTIVE_DAYS:
+            errors.append("STORY_INACTIVE_DAYS must be >= STORY_ACTIVE_DAYS")
+        
+        if cls.STORY_DORMANT_DAYS < cls.STORY_INACTIVE_DAYS:
+            errors.append("STORY_DORMANT_DAYS must be >= STORY_INACTIVE_DAYS")
+        
+        if cls.STORY_MUTE_REFRESH_HOURS < 1:
+            errors.append("STORY_MUTE_REFRESH_HOURS must be at least 1")
 
         return errors
 
