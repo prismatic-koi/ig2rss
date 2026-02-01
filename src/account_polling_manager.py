@@ -182,6 +182,10 @@ class AccountPollingManager:
         if last_post_date is None:
             return 'dormant'
         
+        # Handle timezone-aware datetimes from Instagram
+        if last_post_date.tzinfo is not None:
+            last_post_date = last_post_date.replace(tzinfo=None)
+        
         days_since_post = (datetime.now() - last_post_date).days
         
         if days_since_post <= self.priority_normal_days:
@@ -339,6 +343,10 @@ class AccountPollingManager:
         if has_new_posts:
             last_post_date = metadata.get('latest_post_date')
             if last_post_date:
+                # Handle timezone-aware datetimes
+                if hasattr(last_post_date, 'tzinfo') and last_post_date.tzinfo is not None:
+                    last_post_date = last_post_date.replace(tzinfo=None)
+                
                 days_since_post = (datetime.now() - last_post_date).days
                 
                 if days_since_post <= self.priority_high_days:
@@ -353,6 +361,10 @@ class AccountPollingManager:
         if last_post_date:
             if isinstance(last_post_date, str):
                 last_post_date = datetime.fromisoformat(last_post_date)
+            
+            # Handle timezone-aware datetimes
+            if hasattr(last_post_date, 'tzinfo') and last_post_date.tzinfo is not None:
+                last_post_date = last_post_date.replace(tzinfo=None)
             
             days_since_post = (datetime.now() - last_post_date).days
             
