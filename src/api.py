@@ -8,7 +8,8 @@ import os
 import logging
 import time
 from pathlib import Path
-from typing import Optional, Type
+from typing import Optional, Type, List
+from datetime import datetime
 
 from flask import Flask, Response, request, jsonify, send_file
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -17,7 +18,9 @@ from apscheduler.triggers.interval import IntervalTrigger
 from src.config import Config
 from src.storage import StorageManager
 from src.rss_generator import RSSGenerator
-from src.instagram_client import InstagramClient
+from src.instagram_client import InstagramClient, InstagramPost
+from src.following_manager import FollowingManager, FollowedAccount
+from src.account_polling_manager import AccountPollingManager
 
 logger = logging.getLogger(__name__)
 
@@ -228,72 +231,359 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
     
     # Define sync job
     def sync_instagram():
-        """Sync Instagram posts in background."""
+        """Sync Instagram posts using smart polling or legacy timeline mode."""
         with app.app_context():
             try:
-                logger.info("Starting background Instagram sync")
-                
-                storage: StorageManager = app.config['storage']
-                
-                # Create Instagram client with session persistence
-                client = InstagramClient(
-                    username=config.INSTAGRAM_USERNAME,
-                    password=config.INSTAGRAM_PASSWORD,
-                    session_file=config.SESSION_FILE,
-                    totp_seed=config.INSTAGRAM_2FA_SEED
-                )
-                
-                # Login
-                if not client.login():
-                    logger.error("Failed to login to Instagram")
-                    return
-                
-                # Fetch recent posts
-                posts = client.get_timeline_feed(count=config.FETCH_COUNT)
-                
-                logger.info(f"📥 Fetched {len(posts)} posts from Instagram (after ad filtering)")
-                
-                # Save posts
-                new_count = 0
-                duplicate_count = 0
-                for post in posts:
-                    if not storage.post_exists(post.id):
-                        if storage.save_post(post):
-                            new_count += 1
-                            logger.info(f"💾 SAVED NEW POST from @{post.author_username} (id: {post.id})")
-                            
-                            # Download media
-                            for idx, (media_url, media_type) in enumerate(zip(post.media_urls, post.media_types)):
-                                local_path = storage.get_media_path(post.id, idx, media_type)
-                                
-                                # Download using requests
-                                import requests
-                                try:
-                                    response = requests.get(media_url, timeout=30)
-                                    response.raise_for_status()
-                                    
-                                    with open(local_path, 'wb') as f:
-                                        f.write(response.content)
-                                    
-                                    file_size = len(response.content)
-                                    # Save relative path for URL generation (post_id/filename.ext)
-                                    relative_path = f"{post.id}/{local_path.name}"
-                                    storage.save_media(post.id, idx, media_url, media_type, relative_path, file_size)
-                                    
-                                    logger.debug(f"Downloaded media: {local_path}")
-                                    
-                                    # Small delay between media downloads to avoid hammering CDN
-                                    time.sleep(0.5)
-                                except Exception as e:
-                                    logger.error(f"Failed to download media {media_url}: {e}")
-                    else:
-                        duplicate_count += 1
-                        logger.info(f"⏭️  DUPLICATE (already in DB) from @{post.author_username} (id: {post.id})")
-                
-                logger.info(f"Background sync complete: {new_count} new posts saved, {duplicate_count} duplicates skipped")
-                
+                if config.SMART_POLLING_ENABLED and config.FETCH_STRATEGY == 'profile':
+                    _smart_polling_sync(app, config)
+                else:
+                    _legacy_timeline_sync(app, config)
+                    
             except Exception as e:
                 logger.error(f"Background sync failed: {e}", exc_info=True)
+    
+    def _smart_polling_sync(app: Flask, config: Type[Config]):
+        """Smart polling sync using profile-based fetching."""
+        logger.info("Starting smart polling sync")
+        
+        storage: StorageManager = app.config['storage']
+        
+        # Create Instagram client
+        client = InstagramClient(
+            username=config.INSTAGRAM_USERNAME,
+            password=config.INSTAGRAM_PASSWORD,
+            session_file=config.SESSION_FILE,
+            totp_seed=config.INSTAGRAM_2FA_SEED
+        )
+        
+        # Login
+        if not client.login():
+            logger.error("Failed to login to Instagram")
+            return
+        
+        # Create managers
+        following_manager = FollowingManager(
+            storage=storage,
+            instagram_client=client,
+            cache_hours=config.FOLLOWING_CACHE_HOURS
+        )
+        
+        polling_manager = AccountPollingManager(
+            storage=storage,
+            priority_high_days=config.PRIORITY_HIGH_DAYS,
+            priority_normal_days=config.PRIORITY_NORMAL_DAYS,
+            priority_low_days=config.PRIORITY_LOW_DAYS,
+            poll_high_every_n=config.POLL_HIGH_EVERY_N_CYCLES,
+            poll_normal_every_n=config.POLL_NORMAL_EVERY_N_CYCLES,
+            poll_low_every_n=config.POLL_LOW_EVERY_N_CYCLES,
+            poll_dormant_every_n=config.POLL_DORMANT_EVERY_N_CYCLES,
+            priority_overrides=config.PRIORITY_OVERRIDE_ACCOUNTS
+        )
+        
+        # Check if this is first sync (initialization needed)
+        if polling_manager.is_first_sync():
+            logger.info("=" * 70)
+            logger.info("🚀 FIRST SYNC DETECTED - Initializing activity profiles...")
+            logger.info("=" * 70)
+            
+            # Prominent warning if account limiting is active
+            if config.MAX_ACCOUNTS_TO_FETCH > 0:
+                logger.warning("=" * 70)
+                logger.warning(f"⚠️  TESTING MODE: Limited to {config.MAX_ACCOUNTS_TO_FETCH} accounts")
+                logger.warning("⚠️  Set MAX_ACCOUNTS_TO_FETCH=0 for unlimited (production mode)")
+                logger.warning("=" * 70)
+            
+            # Get following list
+            following_accounts = following_manager.get_following_list()
+            logger.info(f"📋 Following {len(following_accounts)} accounts")
+            
+            # Apply max accounts limit for testing
+            if config.MAX_ACCOUNTS_TO_FETCH > 0:
+                following_accounts = following_accounts[:config.MAX_ACCOUNTS_TO_FETCH]
+                logger.info(f"⚠️  Testing mode: Limiting to {len(following_accounts)} accounts")
+            
+            # CRITICAL: Save following accounts to DB BEFORE initializing activity profiles
+            # This ensures FK constraint is satisfied (account_activity references following_accounts)
+            storage.save_following_accounts([{
+                'user_id': acc.user_id,
+                'username': acc.username,
+                'full_name': acc.full_name,
+                'is_private': acc.is_private
+            } for acc in following_accounts])
+            
+            logger.info(f"🔍 Fetching 1 post from each account to determine activity levels...")
+            
+            # Fetch 1 post from each account to determine priority
+            posts_by_account = {}
+            for idx, account in enumerate(following_accounts, 1):
+                try:
+                    logger.info(f"[{idx}/{len(following_accounts)}] Checking @{account.username}...")
+                    
+                    has_new, posts, metadata = client.check_account_for_new_posts(
+                        user_id=account.user_id,
+                        username=account.username,
+                        last_known_post_id=None  # First sync, no known posts
+                    )
+                    
+                    if posts:
+                        posts_by_account[account.username] = [
+                            {
+                                'id': p.id,
+                                'posted_at': p.posted_at,
+                                'author_username': p.author_username
+                            } for p in posts
+                        ]
+                        
+                        # Save posts to database
+                        for post in posts:
+                            if not storage.post_exists(post.id):
+                                storage.save_post(post)
+                                _download_post_media(post, storage, client)
+                    
+                    # Small delay between accounts
+                    time.sleep(1)
+                    
+                except Exception as e:
+                    logger.error(
+                        f"Failed to check @{account.username}: {e}",
+                        exc_info=True  # Include full traceback for debugging
+                    )
+                    posts_by_account[account.username] = []
+            
+            # Initialize activity profiles
+            distribution = polling_manager.initialize_activity_profiles(
+                accounts=following_accounts,
+                posts_by_account=posts_by_account
+            )
+            
+            # Check initialization success rate
+            successful_accounts = sum(1 for posts in posts_by_account.values() if posts)
+            total_accounts = len(following_accounts)
+            success_rate = successful_accounts / total_accounts if total_accounts > 0 else 0
+            
+            logger.info(
+                f"Initialization results: {successful_accounts}/{total_accounts} accounts "
+                f"succeeded ({success_rate:.1%})"
+            )
+            
+            # Only mark as initialized if we got reasonable success
+            if success_rate < 0.5:
+                logger.error("=" * 70)
+                logger.error(
+                    f"❌ Initialization failed: only {success_rate:.1%} of accounts "
+                    f"initialized successfully."
+                )
+                logger.error("Will retry initialization on next sync.")
+                logger.error("=" * 70)
+                return
+            
+            # Mark as initialized
+            polling_manager.mark_initialized()
+            
+            logger.info("=" * 70)
+            logger.info("✅ Activity profiles initialized:")
+            logger.info(f"   📈 High priority: {distribution['high']} accounts")
+            logger.info(f"   📊 Normal priority: {distribution['normal']} accounts")
+            logger.info(f"   📉 Low priority: {distribution['low']} accounts")
+            logger.info(f"   💤 Dormant: {distribution['dormant']} accounts")
+            logger.info("=" * 70)
+            
+            return
+        
+        # Regular sync (not first time)
+        polling_manager.increment_cycle()
+        
+        # Warn on every sync if limiting is active
+        if config.MAX_ACCOUNTS_TO_FETCH > 0:
+            logger.warning(
+                f"⚠️  Account limit active: MAX_ACCOUNTS_TO_FETCH={config.MAX_ACCOUNTS_TO_FETCH} "
+                f"(set to 0 for unlimited)"
+            )
+        
+        # Refresh following list (respects cache TTL)
+        following_accounts = following_manager.get_following_list()
+        logger.debug(f"Following {len(following_accounts)} accounts (from cache)")
+        
+        # Sync account_activity with following list (add new follows, keep orphaned for now)
+        _sync_following_with_activity(storage, following_accounts, polling_manager)
+        
+        # Get accounts to poll this cycle
+        accounts_to_poll = polling_manager.get_accounts_to_poll_this_cycle(
+            max_accounts=config.MAX_ACCOUNTS_TO_FETCH if config.MAX_ACCOUNTS_TO_FETCH > 0 else None
+        )
+        
+        if not accounts_to_poll:
+            logger.info("No accounts to poll this cycle")
+            return
+        
+        logger.info(f"📊 Cycle {polling_manager.current_cycle}: Polling {len(accounts_to_poll)} accounts")
+        
+        # Poll each account
+        total_new_posts = 0
+        accounts_with_new_posts = 0
+        
+        for idx, activity in enumerate(accounts_to_poll, 1):
+            try:
+                username = activity['username']
+                user_id = activity['user_id']
+                last_post_id = activity.get('last_post_id')
+                
+                logger.info(
+                    f"[{idx}/{len(accounts_to_poll)}] Checking @{username} "
+                    f"(priority: {activity['poll_priority']})"
+                )
+                
+                has_new, posts, metadata = client.check_account_for_new_posts(
+                    user_id=user_id,
+                    username=username,
+                    last_known_post_id=last_post_id
+                )
+                
+                if has_new and posts:
+                    accounts_with_new_posts += 1
+                    
+                    # Save new posts
+                    for post in posts:
+                        if not storage.post_exists(post.id):
+                            storage.save_post(post)
+                            _download_post_media(post, storage, client)
+                            total_new_posts += 1
+                    
+                    logger.info(f"✅ @{username}: {len(posts)} posts fetched")
+                else:
+                    logger.info(f"⏭️  @{username}: No new posts")
+                
+                # Update account priority
+                polling_manager.update_account_priority(
+                    user_id=user_id,
+                    username=username,
+                    has_new_posts=has_new,
+                    metadata=metadata
+                )
+                
+                # Delay between accounts
+                time.sleep(1)
+                
+            except Exception as e:
+                logger.error(
+                    f"Failed to check @{activity['username']}: {e}",
+                    exc_info=True  # Include full traceback for debugging
+                )
+        
+        # Log summary
+        stats = polling_manager.get_priority_stats()
+        logger.info("=" * 70)
+        logger.info(f"📊 Sync complete:")
+        logger.info(f"   🔢 Cycle: {stats['cycle']}")
+        logger.info(f"   📥 Accounts polled: {len(accounts_to_poll)}")
+        logger.info(f"   ✅ Accounts with new posts: {accounts_with_new_posts}")
+        logger.info(f"   💾 New posts saved: {total_new_posts}")
+        logger.info(f"   📈 Priority distribution:")
+        for priority, count in stats['distribution'].items():
+            logger.info(f"      {priority}: {count} accounts")
+        logger.info("=" * 70)
+    
+    def _sync_following_with_activity(
+        storage: StorageManager,
+        following_accounts: List[FollowedAccount],
+        polling_manager: AccountPollingManager
+    ):
+        """Sync following list with account_activity table.
+        
+        Adds newly followed accounts to account_activity.
+        Keeps unfollowed accounts for historical data (can be cleaned up separately).
+        """
+        existing_activities = {a['user_id']: a for a in storage.get_all_account_activity()}
+        following_user_ids = {acc.user_id for acc in following_accounts}
+        
+        # Add new follows
+        new_follows = [acc for acc in following_accounts if acc.user_id not in existing_activities]
+        
+        if new_follows:
+            logger.info(f"Found {len(new_follows)} newly followed accounts, adding to tracking...")
+            for account in new_follows:
+                # Initialize with conservative priority
+                storage.save_account_activity(
+                    user_id=account.user_id,
+                    username=account.username,
+                    media_count=0,
+                    last_post_id=None,
+                    last_post_date=None,
+                    last_checked=datetime.now(),
+                    poll_priority='normal',  # Start as normal, will refine
+                    consecutive_no_new_posts=0
+                )
+                logger.info(f"Added newly followed account: @{account.username}")
+        
+        # Optional: Log unfollowed accounts (but keep them for historical data)
+        unfollowed = [uid for uid in existing_activities if uid not in following_user_ids]
+        if unfollowed:
+            logger.debug(f"{len(unfollowed)} accounts in activity table are no longer followed (keeping for history)")
+    
+    def _download_post_media(post: InstagramPost, storage: StorageManager, client: InstagramClient):
+        """Download media for a post using client's retry logic.
+        
+        Args:
+            post: Instagram post with media to download
+            storage: Storage manager for saving media metadata
+            client: Instagram client with download_media method and retry logic
+        """
+        for idx, (media_url, media_type) in enumerate(zip(post.media_urls, post.media_types)):
+            try:
+                local_path = storage.get_media_path(post.id, idx, media_type)
+                
+                # Use client's download_media method which includes retry logic
+                if client.download_media(media_url, str(local_path)):
+                    file_size = local_path.stat().st_size
+                    relative_path = f"{post.id}/{local_path.name}"
+                    storage.save_media(post.id, idx, media_url, media_type, relative_path, file_size)
+                    logger.debug(f"Downloaded media: {local_path}")
+                else:
+                    logger.error(f"Failed to download media {media_url}")
+                
+                time.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"Failed to download media for post {post.id}: {e}")
+    
+    def _legacy_timeline_sync(app: Flask, config: Type[Config]):
+        """Legacy timeline-based sync (original behavior)."""
+        logger.info("Starting legacy timeline sync")
+        
+        storage: StorageManager = app.config['storage']
+        
+        # Create Instagram client with session persistence
+        client = InstagramClient(
+            username=config.INSTAGRAM_USERNAME,
+            password=config.INSTAGRAM_PASSWORD,
+            session_file=config.SESSION_FILE,
+            totp_seed=config.INSTAGRAM_2FA_SEED
+        )
+        
+        # Login
+        if not client.login():
+            logger.error("Failed to login to Instagram")
+            return
+        
+        # Fetch recent posts
+        posts = client.get_timeline_feed(count=config.FETCH_COUNT)
+        
+        logger.info(f"📥 Fetched {len(posts)} posts from Instagram (after ad filtering)")
+        
+        # Save posts
+        new_count = 0
+        duplicate_count = 0
+        for post in posts:
+            if not storage.post_exists(post.id):
+                if storage.save_post(post):
+                    new_count += 1
+                    logger.info(f"💾 SAVED NEW POST from @{post.author_username} (id: {post.id})")
+                    _download_post_media(post, storage, client)
+            else:
+                duplicate_count += 1
+                logger.info(f"⏭️  DUPLICATE (already in DB) from @{post.author_username} (id: {post.id})")
+        
+        logger.info(f"Background sync complete: {new_count} new posts saved, {duplicate_count} duplicates skipped")
     
     # Schedule job
     scheduler.add_job(

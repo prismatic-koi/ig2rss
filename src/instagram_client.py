@@ -11,7 +11,7 @@ import json
 import re
 import base64
 import requests
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -172,7 +172,10 @@ class InstagramClient:
                     ) from e
             
             # Login with optional 2FA code
-            self.client.login(self.username, self.password, verification_code=verification_code)
+            if verification_code:
+                self.client.login(self.username, self.password, verification_code=verification_code)
+            else:
+                self.client.login(self.username, self.password)
             self._is_authenticated = True
             
             # Save session for future use
@@ -489,6 +492,175 @@ class InstagramClient:
         except Exception as e:
             logger.error(f"Failed to download media from {url}: {e}")
             return False
+    
+    def _fetch_user_medias_with_fix(
+        self, 
+        user_id: str, 
+        amount: int = 20
+    ) -> List:
+        """Fetch user medias with Pydantic validation fixes applied.
+        
+        This method uses the low-level private API to get raw JSON,
+        applies fixes for common Pydantic validation issues, then
+        converts to Media objects.
+        
+        Args:
+            user_id: Instagram user ID (pk)
+            amount: Number of media items to fetch
+            
+        Returns:
+            List of instagrapi Media objects
+        """
+        from instagrapi.extractors import extract_media_v1
+        
+        try:
+            # Use low-level API to get raw JSON
+            items = self.client.private_request(
+                f"feed/user/{user_id}/",
+                params={
+                    "count": amount,
+                    "rank_token": self.client.rank_token,
+                    "ranked_content": "true",
+                },
+            )["items"]
+            
+            medias = []
+            for media_data in items:
+                try:
+                    # Apply Pydantic fixes before extraction
+                    
+                    # Fix 1: clips_metadata.original_sound_info.audio_filter_infos
+                    if "clips_metadata" in media_data:
+                        clips = media_data.get("clips_metadata", {})
+                        if isinstance(clips, dict) and "original_sound_info" in clips:
+                            sound_info = clips.get("original_sound_info", {})
+                            if isinstance(sound_info, dict) and sound_info.get("audio_filter_infos") is None:
+                                sound_info["audio_filter_infos"] = []
+                    
+                    # Fix 2: image_versions2.candidates.scans_profile
+                    if "image_versions2" in media_data:
+                        image_versions = media_data.get("image_versions2", {})
+                        if isinstance(image_versions, dict) and "candidates" in image_versions:
+                            candidates = image_versions.get("candidates", [])
+                            if isinstance(candidates, list):
+                                for candidate in candidates:
+                                    if isinstance(candidate, dict) and candidate.get("scans_profile") is None:
+                                        candidate["scans_profile"] = ""
+                    
+                    # Convert to Media object
+                    media = extract_media_v1(media_data)
+                    medias.append(media)
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to parse media item: {e}")
+                    continue
+            
+            return medias
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch user medias: {e}")
+            raise
+
+    def check_account_for_new_posts(
+        self, 
+        user_id: str, 
+        username: str,
+        last_known_post_id: Optional[str] = None
+    ) -> Tuple[bool, List[InstagramPost], Dict[str, Any]]:
+        """Efficiently check if account has new posts.
+        
+        Uses a 3-step process to minimize API calls:
+        1. Get user_info (media_count) - 1 API call
+        2. If media_count > 0, fetch latest post only - 1 API call
+        3. Compare latest_post.pk with last_known_post_id
+        4. If new, fetch recent posts (amount=20) - 1 API call
+        
+        Args:
+            user_id: Instagram user ID (pk)
+            username: Instagram username (for logging)
+            last_known_post_id: ID of last post we fetched (optional)
+            
+        Returns:
+            Tuple of (has_new_posts, new_posts_list, account_metadata)
+            - has_new_posts: True if new posts detected
+            - new_posts_list: List of InstagramPost objects (empty if no new posts)
+            - account_metadata: Dict with media_count, latest_post_id, latest_post_date
+        """
+        if not self._is_authenticated:
+            logger.error("Cannot check account - not authenticated")
+            raise LoginRequired("Must call login() first")
+        
+        logger.debug(f"Checking @{username} for new posts (last_known={last_known_post_id})")
+        
+        def _check():
+            metadata = {
+                'media_count': 0,
+                'latest_post_id': None,
+                'latest_post_date': None
+            }
+            
+            # Step 1: Get user info (media count)
+            try:
+                user_info = self.client.user_info(user_id)
+                metadata['media_count'] = user_info.media_count
+                
+                logger.debug(f"@{username} has {metadata['media_count']} total posts")
+                
+                # If account has no posts, skip
+                if metadata['media_count'] == 0:
+                    logger.debug(f"@{username} has no posts, skipping")
+                    return False, [], metadata
+                
+            except Exception as e:
+                logger.error(f"Failed to get user info for @{username}: {e}")
+                # Return empty but don't fail completely
+                return False, [], metadata
+            
+            # Step 2: Fetch latest post only (amount=1) with Pydantic fixes
+            try:
+                latest_medias = self._fetch_user_medias_with_fix(user_id, amount=1)
+                
+                if not latest_medias:
+                    logger.debug(f"@{username} returned no posts, skipping")
+                    return False, [], metadata
+                
+                latest_media = latest_medias[0]
+                latest_post_id = str(latest_media.pk)
+                metadata['latest_post_id'] = latest_post_id
+                metadata['latest_post_date'] = latest_media.taken_at
+                
+                logger.debug(f"@{username} latest post: {latest_post_id} (date: {metadata['latest_post_date']})")
+                
+            except Exception as e:
+                logger.error(f"Failed to fetch latest post for @{username}: {e}", exc_info=True)
+                return False, [], metadata
+            
+            # Step 3: Compare with last known post
+            if last_known_post_id and latest_post_id == last_known_post_id:
+                logger.debug(f"@{username} has no new posts (latest={latest_post_id})")
+                return False, [], metadata
+            
+            # Step 4: New post detected! Fetch recent posts (amount=20)
+            logger.info(f"@{username} has new posts! Fetching recent content...")
+            
+            try:
+                recent_medias = self._fetch_user_medias_with_fix(user_id, amount=20)
+                
+                posts = []
+                for media in recent_medias:
+                    post = self._convert_media_to_post(media)
+                    if post:
+                        posts.append(post)
+                
+                logger.info(f"@{username}: Fetched {len(posts)} recent posts")
+                return True, posts, metadata
+                
+            except Exception as e:
+                logger.error(f"Failed to fetch recent posts for @{username}: {e}", exc_info=True)
+                # Return the latest post data we have
+                return True, [], metadata
+        
+        return self._retry_with_backoff(_check)
     
     def logout(self):
         """Log out and clear session."""
