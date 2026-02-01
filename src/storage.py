@@ -11,7 +11,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 
-from .instagram_client import InstagramPost
+from .instagram_client import InstagramPost, InstagramStory
 
 
 logger = logging.getLogger(__name__)
@@ -152,6 +152,48 @@ class StorageManager:
                 )
             """)
             
+            # Stories table (Phase 2: Stories Support)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS stories (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    full_name TEXT,
+                    taken_at TIMESTAMP NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    media_url TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    local_path TEXT,
+                    file_size INTEGER,
+                    downloaded_at TIMESTAMP,
+                    poll_question TEXT,
+                    poll_options TEXT,
+                    link_text TEXT,
+                    sticker_text TEXT,
+                    permalink TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Account story activity table (Phase 2: Stories Support)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS account_story_activity (
+                    user_id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    is_muting_stories BOOLEAN DEFAULT 0,
+                    last_story_id TEXT,
+                    last_story_date TIMESTAMP,
+                    last_checked TIMESTAMP NOT NULL,
+                    story_poll_priority TEXT DEFAULT 'normal',
+                    consecutive_no_new_stories INTEGER DEFAULT 0,
+                    stories_fetched_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES following_accounts(user_id)
+                )
+            """)
+            
             # Create indexes for common queries
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_posts_posted_at 
@@ -191,6 +233,42 @@ class StorageManager:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_activity_last_post_date 
                 ON account_activity(last_post_date DESC)
+            """)
+            
+            # Story table indexes (Phase 2: Stories Support)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_stories_username 
+                ON stories(username)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_stories_taken_at 
+                ON stories(taken_at DESC)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_stories_expires_at 
+                ON stories(expires_at)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_story_activity_muted 
+                ON account_story_activity(is_muting_stories)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_story_activity_last_checked 
+                ON account_story_activity(last_checked)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_story_activity_priority 
+                ON account_story_activity(story_poll_priority)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_story_activity_last_story_date 
+                ON account_story_activity(last_story_date DESC)
             """)
             
             logger.info("Database schema initialized successfully")
@@ -765,3 +843,342 @@ class StorageManager:
         except Exception as e:
             logger.error(f"Failed to get sync metadata {key}: {e}")
             return default
+    
+    # ============================================================================
+    # Story Methods (Phase 2: Stories Support)
+    # ============================================================================
+    
+    def story_exists(self, story_id: str) -> bool:
+        """Check if a story already exists in the database.
+        
+        Args:
+            story_id: Instagram story ID
+            
+        Returns:
+            True if story exists, False otherwise
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM stories WHERE id = ?", (story_id,))
+            return cursor.fetchone() is not None
+    
+    def save_story(self, story) -> bool:
+        """Save a story to the database.
+        
+        Args:
+            story: InstagramStory object to save
+            
+        Returns:
+            True if save successful, False otherwise
+        """
+        import json
+        
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    INSERT OR REPLACE INTO stories
+                    (id, user_id, username, full_name, taken_at, expires_at,
+                     media_url, media_type, permalink, poll_question, poll_options,
+                     link_text, sticker_text, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    story.id,
+                    story.user_id,
+                    story.username,
+                    story.full_name,
+                    story.taken_at,
+                    story.expires_at,
+                    story.media_url,
+                    story.media_type,
+                    story.permalink,
+                    story.poll_question,
+                    json.dumps(story.poll_options) if story.poll_options else None,
+                    story.link_text,
+                    json.dumps(story.sticker_text) if story.sticker_text else None
+                ))
+                
+                logger.info(f"Saved story {story.id} from @{story.username}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to save story {story.id}: {e}")
+            return False
+    
+    def get_story_by_id(self, story_id: str) -> Optional[Dict[str, Any]]:
+        """Get a single story by ID.
+        
+        Args:
+            story_id: Instagram story ID
+            
+        Returns:
+            Story dictionary or None if not found
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM stories WHERE id = ?", (story_id,))
+                row = cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Failed to get story {story_id}: {e}")
+            return None
+    
+    def get_recent_stories(self, limit: int = 50, days: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Query recent stories from the database.
+        
+        Args:
+            limit: Maximum number of stories to return
+            days: Only return stories from the last N days (optional)
+            
+        Returns:
+            List of story dictionaries
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                query = "SELECT * FROM stories WHERE 1=1"
+                params = []
+                
+                if days is not None:
+                    cutoff_date = datetime.now() - timedelta(days=days)
+                    query += " AND taken_at >= ?"
+                    params.append(cutoff_date)
+                
+                query += " ORDER BY taken_at DESC LIMIT ?"
+                params.append(limit)
+                
+                cursor.execute(query, params)
+                stories = [dict(row) for row in cursor.fetchall()]
+                
+                logger.info(f"Retrieved {len(stories)} stories (limit={limit}, days={days})")
+                return stories
+                
+        except Exception as e:
+            logger.error(f"Failed to query recent stories: {e}")
+            return []
+    
+    def update_story_media(self, story_id: str, local_path: str, file_size: int) -> bool:
+        """Update story with local file information after download.
+        
+        Args:
+            story_id: Instagram story ID
+            local_path: Local filesystem path where file was saved
+            file_size: Size of downloaded file in bytes
+            
+        Returns:
+            True if update successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE stories
+                    SET local_path = ?, file_size = ?, downloaded_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (local_path, file_size, story_id))
+                
+                if cursor.rowcount == 0:
+                    logger.warning(f"No story record found to update for {story_id}")
+                    return False
+                
+                logger.debug(f"Updated story media for {story_id}")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to update story media for {story_id}: {e}")
+            return False
+    
+    # ============================================================================
+    # Story Activity Methods (Phase 2: Stories Support)
+    # ============================================================================
+    
+    def save_account_story_activity(self, user_id: str, username: str, **kwargs) -> bool:
+        """Save or update account story activity data.
+        
+        Args:
+            user_id: Instagram user ID
+            username: Instagram username
+            **kwargs: Optional fields - is_muting_stories, last_story_id, 
+                     last_story_date, last_checked, story_poll_priority,
+                     consecutive_no_new_stories, stories_fetched_count
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                now = datetime.now()
+                cursor.execute("""
+                    INSERT OR REPLACE INTO account_story_activity
+                    (user_id, username, is_muting_stories, last_story_id, 
+                     last_story_date, last_checked, story_poll_priority,
+                     consecutive_no_new_stories, stories_fetched_count, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    user_id,
+                    username,
+                    kwargs.get('is_muting_stories', False),
+                    kwargs.get('last_story_id'),
+                    kwargs.get('last_story_date'),
+                    kwargs.get('last_checked', now),
+                    kwargs.get('story_poll_priority', 'normal'),
+                    kwargs.get('consecutive_no_new_stories', 0),
+                    kwargs.get('stories_fetched_count', 0),
+                    now
+                ))
+                
+                logger.debug(f"Saved story activity for {username}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to save story activity for {username}: {e}")
+            return False
+    
+    def update_account_story_activity(self, user_id: str, **kwargs) -> bool:
+        """Update specific fields of an account story activity record.
+        
+        Args:
+            user_id: Instagram user ID
+            **kwargs: Fields to update
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Build dynamic UPDATE query
+                update_fields = []
+                values = []
+                for key, value in kwargs.items():
+                    if key in ['is_muting_stories', 'last_story_id', 'last_story_date',
+                              'last_checked', 'story_poll_priority', 
+                              'consecutive_no_new_stories', 'stories_fetched_count']:
+                        update_fields.append(f"{key} = ?")
+                        values.append(value)
+                
+                if not update_fields:
+                    logger.warning(f"No valid fields to update for user {user_id}")
+                    return False
+                
+                update_fields.append("updated_at = ?")
+                values.append(datetime.now())
+                values.append(user_id)
+                
+                query = f"UPDATE account_story_activity SET {', '.join(update_fields)} WHERE user_id = ?"
+                cursor.execute(query, values)
+                
+                if cursor.rowcount == 0:
+                    logger.warning(f"No story activity record found to update for user {user_id}")
+                    return False
+                
+                logger.debug(f"Updated story activity for user {user_id}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to update story activity for user {user_id}: {e}")
+            return False
+    
+    def get_account_story_activity(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get account story activity data for a specific user.
+        
+        Args:
+            user_id: Instagram user ID
+            
+        Returns:
+            Activity dictionary or None if not found
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM account_story_activity WHERE user_id = ?", (user_id,))
+                row = cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Failed to get story activity for user {user_id}: {e}")
+            return None
+    
+    def get_all_account_story_activity(self) -> List[Dict[str, Any]]:
+        """Get all account story activity records.
+        
+        Returns:
+            List of activity dictionaries
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM account_story_activity ORDER BY last_checked DESC")
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get all story activity: {e}")
+            return []
+    
+    def get_unmuted_accounts_for_stories(self) -> List[Dict[str, Any]]:
+        """Get all accounts where is_muting_stories = False.
+        
+        Returns:
+            List of activity dictionaries for unmuted accounts
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT * FROM account_story_activity
+                    WHERE is_muting_stories = 0
+                    ORDER BY last_checked ASC
+                """)
+                accounts = [dict(row) for row in cursor.fetchall()]
+                logger.debug(f"Retrieved {len(accounts)} unmuted accounts for stories")
+                return accounts
+        except Exception as e:
+            logger.error(f"Failed to get unmuted accounts for stories: {e}")
+            return []
+    
+    def get_accounts_by_story_priority(self, priority: str) -> List[Dict[str, Any]]:
+        """Get all accounts with a specific story priority level.
+        
+        Args:
+            priority: Priority level ('high', 'normal', 'low', 'dormant')
+            
+        Returns:
+            List of activity dictionaries
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT * FROM account_story_activity
+                    WHERE story_poll_priority = ?
+                    ORDER BY last_checked ASC
+                """, (priority,))
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get accounts by story priority {priority}: {e}")
+            return []
+    
+    def get_story_priority_distribution(self) -> Dict[str, int]:
+        """Get count of accounts by story priority level.
+        
+        Returns:
+            Dictionary mapping priority -> count
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT story_poll_priority, COUNT(*) as count
+                    FROM account_story_activity
+                    GROUP BY story_poll_priority
+                """)
+                distribution = {row['story_poll_priority']: row['count'] for row in cursor.fetchall()}
+                logger.debug(f"Story priority distribution: {distribution}")
+                return distribution
+        except Exception as e:
+            logger.error(f"Failed to get story priority distribution: {e}")
+            return {}
+
