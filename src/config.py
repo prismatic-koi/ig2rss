@@ -39,7 +39,7 @@ class Config:
     
     # Content Fetching
     POSTS_PER_USER: int = int(os.getenv("POSTS_PER_USER", "20"))
-    MAX_ACCOUNTS_TO_FETCH: int = int(os.getenv("MAX_ACCOUNTS_TO_FETCH", "10"))  # 0 = unlimited
+    MAX_ACCOUNTS_TO_FETCH: int = int(os.getenv("MAX_ACCOUNTS_TO_FETCH", "0"))  # 0 = unlimited
     
     # Following List Cache
     FOLLOWING_CACHE_HOURS: int = int(os.getenv("FOLLOWING_CACHE_HOURS", "24"))
