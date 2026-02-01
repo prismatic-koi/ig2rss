@@ -489,6 +489,9 @@ class StorageManager:
                 cursor.execute("SELECT COUNT(*) as count FROM posts")
                 post_count = cursor.fetchone()['count']
                 
+                cursor.execute("SELECT COUNT(*) as count FROM stories")
+                story_count = cursor.fetchone()['count']
+                
                 cursor.execute("SELECT COUNT(*) as count FROM media")
                 media_count = cursor.fetchone()['count']
                 
@@ -506,6 +509,7 @@ class StorageManager:
                 
                 return {
                     'post_count': post_count,
+                    'story_count': story_count,
                     'media_count': media_count,
                     'downloaded_count': downloaded_count,
                     'oldest_post': dates['oldest'],
