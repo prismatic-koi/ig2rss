@@ -1,7 +1,7 @@
-"""RSS 2.0 feed generator for Instagram posts.
+"""RSS 2.0 feed generator for Instagram posts and stories.
 
-This module generates valid RSS 2.0 XML feeds from stored Instagram posts,
-with support for embedded images, videos, and carousel posts.
+This module generates valid RSS 2.0 XML feeds from stored Instagram posts and stories,
+with support for embedded images, videos, carousel posts, and story text content.
 """
 
 import logging
@@ -31,19 +31,23 @@ class RSSGenerator:
         logger.info(f"RSSGenerator initialized (base_url={base_url})")
     
     def generate_feed(self, posts: List[Dict[str, Any]], 
+                     stories: Optional[List[Dict[str, Any]]] = None,
                      limit: Optional[int] = None,
                      days: Optional[int] = None) -> str:
-        """Generate RSS 2.0 XML feed from posts.
+        """Generate RSS 2.0 XML feed from posts and stories.
         
         Args:
             posts: List of post dictionaries from StorageManager
-            limit: Maximum number of posts (for display in feed info)
+            stories: List of story dictionaries from StorageManager (optional)
+            limit: Maximum number of items (for display in feed info)
             days: Days filter (for display in feed info)
             
         Returns:
             RSS 2.0 XML string
         """
-        logger.info(f"Generating RSS feed with {len(posts)} posts")
+        stories = stories or []
+        total_items = len(posts) + len(stories)
+        logger.info(f"Generating RSS feed with {len(posts)} posts and {len(stories)} stories")
         
         # Create RSS root element
         rss = ET.Element('rss', version='2.0')
@@ -77,9 +81,25 @@ class RSSGenerator:
         # Add lastBuildDate
         ET.SubElement(channel, 'lastBuildDate').text = self._format_rfc822(datetime.now())
         
-        # Add items for each post
+        # Combine posts and stories, mark type
+        all_items = []
         for post in posts:
-            self._add_post_item(channel, post)
+            all_items.append({'type': 'post', 'data': post})
+        for story in stories:
+            all_items.append({'type': 'story', 'data': story})
+        
+        # Sort by date (taken_at for stories, posted_at for posts) - newest first
+        all_items.sort(
+            key=lambda x: x['data'].get('taken_at' if x['type'] == 'story' else 'posted_at'),
+            reverse=True
+        )
+        
+        # Add items for each post and story
+        for item in all_items:
+            if item['type'] == 'post':
+                self._add_post_item(channel, item['data'])
+            else:
+                self._add_story_item(channel, item['data'])
         
         # Convert to string with XML declaration
         xml_str = ET.tostring(rss, encoding='utf-8', method='xml')
@@ -124,6 +144,52 @@ class RSSGenerator:
         
         # Add enclosure for first video/image (RSS standard is one enclosure per item)
         self._add_enclosure(item, post)
+    
+    def _add_story_item(self, channel: ET.Element, story: Dict[str, Any]):
+        """Add a single story as an RSS item.
+        
+        Args:
+            channel: XML channel element to add item to
+            story: Story dictionary from StorageManager
+        """
+        item = ET.SubElement(channel, 'item')
+        
+        # Title - prefix with [STORY] and author name
+        author_name = story.get('full_name') or story['username']
+        title = f"[STORY] {author_name}"
+        
+        # Add text content to title if available
+        if story.get('poll_question'):
+            title += f": {story['poll_question']}"
+        elif story.get('link_text'):
+            title += f": {story['link_text']}"
+        
+        ET.SubElement(item, 'title').text = title
+        
+        # Link - permalink to Instagram story
+        ET.SubElement(item, 'link').text = story['permalink']
+        
+        # GUID - use story ID as unique identifier
+        guid = ET.SubElement(item, 'guid')
+        guid.text = story['id']
+        guid.set('isPermaLink', 'false')
+        
+        # PubDate - format as RFC 822
+        taken_at = story['taken_at']
+        if isinstance(taken_at, str):
+            taken_at = datetime.fromisoformat(taken_at)
+        ET.SubElement(item, 'pubDate').text = self._format_rfc822(taken_at)
+        
+        # Author
+        author_name = story.get('full_name') or story['username']
+        ET.SubElement(item, 'author').text = f"{story['username']}@instagram.com ({author_name})"
+        
+        # Description - HTML content with media and text content
+        description = self._format_story_description(story)
+        ET.SubElement(item, 'description').text = description
+        
+        # Add enclosure for story media
+        self._add_story_enclosure(item, story)
     
     def _add_enclosure(self, item: ET.Element, post: Dict[str, Any]):
         """Add enclosure element for media (RSS standard for attachments).
@@ -267,3 +333,113 @@ class RSSGenerator:
         # RSS 2.0 requires RFC 822 date format
         # strftime format: "Day, DD Mon YYYY HH:MM:SS +0000"
         return dt.strftime('%a, %d %b %Y %H:%M:%S +0000')
+    
+    def _add_story_enclosure(self, item: ET.Element, story: Dict[str, Any]):
+        """Add enclosure element for story media.
+        
+        Args:
+            item: XML item element to add enclosure to
+            story: Story dictionary from StorageManager
+        """
+        # Build enclosure URL
+        if story.get('local_path'):
+            media_url = f"{self.base_url}/media/{story['local_path']}"
+        else:
+            media_url = story['media_url']
+        
+        # Determine MIME type
+        if story['media_type'] == 'video':
+            mime_type = 'video/mp4'
+        else:
+            mime_type = 'image/jpeg'
+        
+        # Get file size (required by RSS spec, use 0 if unknown)
+        file_size = story.get('file_size', 0)
+        
+        # Add enclosure element
+        enclosure = ET.SubElement(item, 'enclosure')
+        enclosure.set('url', media_url)
+        enclosure.set('type', mime_type)
+        enclosure.set('length', str(file_size))
+        
+        logger.debug(f"Added story enclosure: {mime_type} {file_size} bytes")
+    
+    def _format_story_description(self, story: Dict[str, Any]) -> str:
+        """Format story description with embedded media and text content.
+        
+        Args:
+            story: Story dictionary from StorageManager
+            
+        Returns:
+            HTML string for RSS description
+        """
+        import json
+        
+        html_parts = []
+        
+        # Add media (image/video)
+        media_type = story['media_type']
+        
+        if story.get('local_path'):
+            media_url = f"{self.base_url}/media/{story['local_path']}"
+        else:
+            media_url = story['media_url']
+        
+        if media_type == 'image':
+            html_parts.append(f'<p><img src="{html.escape(media_url)}" style="max-width:100%;height:auto;" /></p>')
+        elif media_type == 'video':
+            html_parts.append(f'<p><video controls style="max-width:100%;height:auto;"><source src="{html.escape(media_url)}" type="video/mp4" />Your browser does not support the video tag.</video></p>')
+        
+        # Add text content if available
+        text_parts = []
+        
+        # Poll question and options
+        if story.get('poll_question'):
+            text_parts.append(f"<strong>Poll:</strong> {html.escape(story['poll_question'])}")
+            if story.get('poll_options'):
+                try:
+                    # poll_options might be JSON string or list
+                    if isinstance(story['poll_options'], str):
+                        options = json.loads(story['poll_options'])
+                    else:
+                        options = story['poll_options']
+                    options_html = '<br/>'.join([f"• {html.escape(opt)}" for opt in options])
+                    text_parts.append(options_html)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        
+        # Link text
+        if story.get('link_text'):
+            text_parts.append(f"<strong>Link:</strong> {html.escape(story['link_text'])}")
+        
+        # Sticker text (if any)
+        if story.get('sticker_text'):
+            try:
+                if isinstance(story['sticker_text'], str):
+                    sticker_data = json.loads(story['sticker_text'])
+                else:
+                    sticker_data = story['sticker_text']
+                
+                if sticker_data:
+                    text_parts.append(f"<strong>Stickers:</strong> {html.escape(str(sticker_data))}")
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+        if text_parts:
+            text_html = '<br/>'.join(text_parts)
+            html_parts.append(f'<p>{text_html}</p>')
+        
+        # Add expiration notice
+        expires_at = story.get('expires_at')
+        if expires_at:
+            if isinstance(expires_at, str):
+                expires_at = datetime.fromisoformat(expires_at)
+            html_parts.append(f'<p><em>Story expires: {expires_at.strftime("%Y-%m-%d %H:%M UTC")}</em></p>')
+        
+        # Add link to original story
+        permalink = html.escape(story["permalink"])
+        html_parts.append(f'<p><a href="{permalink}">View on Instagram</a></p>')
+        
+        return '\n'.join(html_parts)
+
+
