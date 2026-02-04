@@ -72,6 +72,21 @@ class InstagramClient:
         self.client = Client()
         self._is_authenticated = False
         
+        # Set modern device fingerprint (more realistic than default OnePlus 6T from 2017)
+        # Using Pixel 7 Pro with Android 13 - common device less likely to be flagged
+        self.client.set_device({
+            "app_version": "415.0.0.36.76",  # Latest Instagram version
+            "android_version": 33,           # Android 13
+            "android_release": "13",
+            "dpi": "420dpi",
+            "resolution": "1080x2400",
+            "manufacturer": "Google",
+            "device": "cheetah",             # Pixel 7 Pro codename
+            "model": "Pixel 7 Pro",
+            "cpu": "tensor",                 # Google Tensor G2
+            "version_code": "121013382"      # Version code from APK for 415.0.0.36.76
+        })
+        
         # Configure client for better behavior
         # Add random delays between 1-3 seconds (mimics human behavior)
         self.client.delay_range = [1, 3]
