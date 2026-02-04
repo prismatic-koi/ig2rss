@@ -77,6 +77,11 @@ class InstagramClient:
         self.max_retries = 3
         self.base_backoff = 2  # seconds
         
+        # Re-authentication metrics
+        self._reauth_attempts = 0
+        self._reauth_successes = 0
+        self._reauth_failures = 0
+        
         logger.info(f"InstagramClient initialized for user: {username}")
         if totp_seed:
             logger.info("2FA TOTP seed provided for authentication")
@@ -198,8 +203,89 @@ class InstagramClient:
             logger.error(f"Login failed with unexpected error: {e}")
             raise
     
+    def validate_session(self) -> bool:
+        """Check if current session is still valid.
+        
+        Performs a lightweight API call to verify the session is working.
+        If the session has expired, marks the client as not authenticated
+        so the next operation will trigger re-authentication.
+        
+        Returns:
+            True if session is valid and working
+            False if session expired or invalid
+        """
+        if not self._is_authenticated:
+            logger.debug("validate_session: Not authenticated")
+            return False
+        
+        try:
+            # Quick lightweight check - fetch just 1 item from timeline
+            self.client.get_timeline_feed(count=1)
+            logger.debug("Session validation successful")
+            return True
+        except (LoginRequired, PleaseWaitFewMinutes) as e:
+            if self._is_authentication_error(e):
+                logger.warning(
+                    "Session validation failed - session has expired. "
+                    "Will re-authenticate on next operation."
+                )
+                self._is_authenticated = False
+                return False
+            # Real rate limit, session is still fine
+            logger.debug("Session validation: rate limited but session is valid")
+            return True
+        except Exception as e:
+            logger.warning(f"Session validation check failed: {e}")
+            return False
+    
+    def _is_authentication_error(self, exception: Exception) -> bool:
+        """Detect if exception indicates session expiry or authentication failure.
+        
+        Instagram returns 401 with 'Please wait a few minutes' when session expires,
+        which instagrapi wraps as PleaseWaitFewMinutes. We need to check the 
+        underlying HTTP status code to distinguish it from actual rate limiting.
+        
+        Args:
+            exception: Exception to check
+            
+        Returns:
+            True if this is an authentication error, False otherwise
+        """
+        # Check if it's PleaseWaitFewMinutes with 401 status (session expired)
+        if isinstance(exception, PleaseWaitFewMinutes):
+            response = getattr(exception, 'response', None)
+            if response and response.status_code == 401:
+                logger.debug(
+                    f"Detected authentication error: {type(exception).__name__} "
+                    f"with status 401"
+                )
+                return True
+        
+        # Direct LoginRequired exception
+        if isinstance(exception, LoginRequired):
+            logger.debug(f"Detected LoginRequired exception")
+            return True
+        
+        return False
+    
+    def get_reauth_metrics(self) -> dict:
+        """Get re-authentication metrics for monitoring.
+        
+        Returns:
+            Dict with reauth_attempts, reauth_successes, reauth_failures
+        """
+        return {
+            'reauth_attempts': self._reauth_attempts,
+            'reauth_successes': self._reauth_successes,
+            'reauth_failures': self._reauth_failures
+        }
+    
     def _retry_with_backoff(self, func, *args, **kwargs) -> Any:
         """Execute a function with exponential backoff retry logic.
+        
+        Now includes automatic re-authentication on session expiry detection.
+        When a 401 error is detected (wrapped as PleaseWaitFewMinutes),
+        attempts to re-authenticate once before retrying.
         
         Args:
             func: Function to execute
@@ -213,13 +299,48 @@ class InstagramClient:
             Last exception if all retries fail
         """
         last_exception: Exception = Exception("No attempts made")
+        auth_retry_attempted = False  # Track if we already tried re-auth
         
         for attempt in range(self.max_retries):
             try:
                 return func(*args, **kwargs)
                 
             except PleaseWaitFewMinutes as e:
-                # Rate limiting - use longer backoff
+                # Check if this is actually an authentication error (401)
+                if self._is_authentication_error(e) and not auth_retry_attempted:
+                    logger.warning(
+                        "Detected authentication failure (401 Unauthorized). "
+                        "Session has expired. Attempting to re-authenticate..."
+                    )
+                    
+                    # Mark as not authenticated and try to re-login
+                    self._is_authenticated = False
+                    auth_retry_attempted = True
+                    self._reauth_attempts += 1
+                    
+                    try:
+                        if self.login():
+                            logger.info(
+                                "Re-authentication successful. Session restored. "
+                                "Retrying operation..."
+                            )
+                            self._reauth_successes += 1
+                            continue  # Retry the operation with new session
+                        else:
+                            logger.error("Re-authentication failed")
+                            self._reauth_failures += 1
+                            raise LoginRequired(
+                                "Failed to re-authenticate after session expiry"
+                            )
+                    except LoginRequired:
+                        # Already handled above, just re-raise
+                        raise
+                    except Exception as login_err:
+                        logger.error(f"Re-authentication error: {login_err}")
+                        self._reauth_failures += 1
+                        raise
+                
+                # Real rate limiting (429 or other non-auth errors) - use longer backoff
                 wait_time = self.base_backoff * (2 ** attempt) * 5  # 10s, 20s, 40s
                 logger.warning(
                     f"Rate limited by Instagram. Waiting {wait_time}s before retry "
@@ -227,6 +348,37 @@ class InstagramClient:
                 )
                 time.sleep(wait_time)
                 last_exception = e
+                
+            except LoginRequired as e:
+                # Direct login required exception
+                if not auth_retry_attempted:
+                    logger.warning(
+                        "Session expired (LoginRequired). Attempting to re-authenticate..."
+                    )
+                    self._is_authenticated = False
+                    auth_retry_attempted = True
+                    self._reauth_attempts += 1
+                    
+                    try:
+                        if self.login():
+                            logger.info("Re-authentication successful. Retrying operation...")
+                            self._reauth_successes += 1
+                            continue
+                        else:
+                            logger.error("Re-authentication failed")
+                            self._reauth_failures += 1
+                            raise
+                    except LoginRequired:
+                        # Already handled above, just re-raise
+                        raise
+                    except Exception as login_err:
+                        logger.error(f"Re-authentication error: {login_err}")
+                        self._reauth_failures += 1
+                        raise
+                else:
+                    # Already tried re-auth, don't retry again
+                    logger.error("Re-authentication already attempted and failed")
+                    raise
                 
             except (ClientError, ConnectionError) as e:
                 # Network or API errors

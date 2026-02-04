@@ -554,3 +554,290 @@ class TestInstagramClientLogout:
         instagram_client.logout()  # Should not raise
         
         assert instagram_client._is_authenticated is False
+
+
+class TestInstagramClientAuthenticationDetection:
+    """Tests for authentication error detection."""
+    
+    def test_is_authentication_error_with_401_please_wait(self, instagram_client):
+        """Test that 401 wrapped in PleaseWaitFewMinutes is detected as auth error."""
+        mock_response = Mock()
+        mock_response.status_code = 401
+        
+        exception = PleaseWaitFewMinutes("Please wait a few minutes")
+        exception.response = mock_response
+        
+        assert instagram_client._is_authentication_error(exception) is True
+    
+    def test_is_authentication_error_with_429_please_wait(self, instagram_client):
+        """Test that 429 (real rate limit) is NOT detected as auth error."""
+        mock_response = Mock()
+        mock_response.status_code = 429
+        
+        exception = PleaseWaitFewMinutes("Please wait a few minutes")
+        exception.response = mock_response
+        
+        assert instagram_client._is_authentication_error(exception) is False
+    
+    def test_is_authentication_error_with_login_required(self, instagram_client):
+        """Test that LoginRequired is detected as auth error."""
+        exception = LoginRequired("Login required")
+        
+        assert instagram_client._is_authentication_error(exception) is True
+    
+    def test_is_authentication_error_with_other_exception(self, instagram_client):
+        """Test that other exceptions are not detected as auth errors."""
+        exception = ClientError("Some error")
+        
+        assert instagram_client._is_authentication_error(exception) is False
+    
+    def test_is_authentication_error_without_response(self, instagram_client):
+        """Test PleaseWaitFewMinutes without response attribute."""
+        exception = PleaseWaitFewMinutes("Please wait")
+        # No response attribute set
+        
+        assert instagram_client._is_authentication_error(exception) is False
+
+
+class TestInstagramClientValidateSession:
+    """Tests for session validation."""
+    
+    def test_validate_session_when_not_authenticated(self, instagram_client):
+        """Test validate_session returns False when not authenticated."""
+        instagram_client._is_authenticated = False
+        
+        result = instagram_client.validate_session()
+        
+        assert result is False
+    
+    def test_validate_session_success(self, instagram_client):
+        """Test validate_session returns True when session is valid."""
+        instagram_client._is_authenticated = True
+        instagram_client.client.get_timeline_feed = Mock(return_value={"feed_items": []})
+        
+        result = instagram_client.validate_session()
+        
+        assert result is True
+        instagram_client.client.get_timeline_feed.assert_called_once_with(count=1)
+    
+    def test_validate_session_expired_401(self, instagram_client):
+        """Test validate_session detects expired session (401)."""
+        instagram_client._is_authenticated = True
+        
+        mock_response = Mock()
+        mock_response.status_code = 401
+        
+        exception = PleaseWaitFewMinutes("Please wait")
+        exception.response = mock_response
+        
+        instagram_client.client.get_timeline_feed = Mock(side_effect=exception)
+        
+        result = instagram_client.validate_session()
+        
+        assert result is False
+        assert instagram_client._is_authenticated is False
+    
+    def test_validate_session_rate_limited_429(self, instagram_client):
+        """Test validate_session returns True on rate limit (session still valid)."""
+        instagram_client._is_authenticated = True
+        
+        mock_response = Mock()
+        mock_response.status_code = 429
+        
+        exception = PleaseWaitFewMinutes("Please wait")
+        exception.response = mock_response
+        
+        instagram_client.client.get_timeline_feed = Mock(side_effect=exception)
+        
+        result = instagram_client.validate_session()
+        
+        # Session is still valid, just rate limited
+        assert result is True
+        assert instagram_client._is_authenticated is True
+    
+    def test_validate_session_login_required(self, instagram_client):
+        """Test validate_session detects LoginRequired exception."""
+        instagram_client._is_authenticated = True
+        instagram_client.client.get_timeline_feed = Mock(
+            side_effect=LoginRequired("Login required")
+        )
+        
+        result = instagram_client.validate_session()
+        
+        assert result is False
+        assert instagram_client._is_authenticated is False
+    
+    def test_validate_session_unexpected_error(self, instagram_client):
+        """Test validate_session handles unexpected errors gracefully."""
+        instagram_client._is_authenticated = True
+        instagram_client.client.get_timeline_feed = Mock(
+            side_effect=RuntimeError("Unexpected")
+        )
+        
+        result = instagram_client.validate_session()
+        
+        assert result is False
+
+
+class TestInstagramClientReauthMetrics:
+    """Tests for re-authentication metrics."""
+    
+    def test_initial_metrics_are_zero(self, instagram_client):
+        """Test that metrics are initialized to zero."""
+        metrics = instagram_client.get_reauth_metrics()
+        
+        assert metrics['reauth_attempts'] == 0
+        assert metrics['reauth_successes'] == 0
+        assert metrics['reauth_failures'] == 0
+    
+    def test_metrics_after_successful_reauth(self, instagram_client):
+        """Test metrics are updated after successful re-authentication."""
+        instagram_client._is_authenticated = True
+        
+        # Mock 401 error followed by successful operation
+        mock_response = Mock()
+        mock_response.status_code = 401
+        exception = PleaseWaitFewMinutes("Please wait")
+        exception.response = mock_response
+        
+        empty_feed = {"feed_items": []}
+        instagram_client.client.get_timeline_feed = Mock(
+            side_effect=[exception, empty_feed]
+        )
+        
+        # Mock successful re-login
+        instagram_client.client.login = Mock(return_value=True)
+        
+        with patch("time.sleep"):
+            posts = instagram_client.get_timeline_feed()
+        
+        metrics = instagram_client.get_reauth_metrics()
+        assert metrics['reauth_attempts'] == 1
+        assert metrics['reauth_successes'] == 1
+        assert metrics['reauth_failures'] == 0
+    
+    def test_metrics_after_failed_reauth(self, instagram_client):
+        """Test metrics are updated after failed re-authentication."""
+        instagram_client._is_authenticated = True
+        
+        # Mock 401 error
+        mock_response = Mock()
+        mock_response.status_code = 401
+        exception = PleaseWaitFewMinutes("Please wait")
+        exception.response = mock_response
+        
+        instagram_client.client.get_timeline_feed = Mock(side_effect=exception)
+        
+        # Mock failed re-login
+        instagram_client.login = Mock(return_value=False)
+        
+        with patch("time.sleep"):
+            with pytest.raises(LoginRequired):
+                instagram_client.get_timeline_feed()
+        
+        metrics = instagram_client.get_reauth_metrics()
+        assert metrics['reauth_attempts'] == 1
+        assert metrics['reauth_successes'] == 0
+        assert metrics['reauth_failures'] == 1
+
+
+class TestInstagramClientAutoReauthentication:
+    """Tests for automatic re-authentication on session expiry."""
+    
+    def test_auto_reauth_on_401_error(self, instagram_client):
+        """Test automatic re-authentication when 401 error is detected."""
+        instagram_client._is_authenticated = True
+        
+        # Mock 401 error followed by successful retry
+        mock_response = Mock()
+        mock_response.status_code = 401
+        exception = PleaseWaitFewMinutes("Please wait")
+        exception.response = mock_response
+        
+        empty_feed = {"feed_items": []}
+        instagram_client.client.get_timeline_feed = Mock(
+            side_effect=[exception, empty_feed]
+        )
+        
+        # Mock successful re-login
+        instagram_client.client.login = Mock(return_value=True)
+        
+        with patch("time.sleep"):
+            posts = instagram_client.get_timeline_feed()
+        
+        # Should succeed after re-auth
+        assert posts == []
+        # Login should be called for re-auth
+        instagram_client.client.login.assert_called_once()
+        # Timeline feed should be called twice (fail, then succeed)
+        assert instagram_client.client.get_timeline_feed.call_count == 2
+    
+    def test_auto_reauth_only_once_per_operation(self, instagram_client):
+        """Test that re-authentication is only attempted once per operation."""
+        instagram_client._is_authenticated = True
+        
+        # Mock persistent 401 error
+        mock_response = Mock()
+        mock_response.status_code = 401
+        exception = PleaseWaitFewMinutes("Please wait")
+        exception.response = mock_response
+        
+        instagram_client.client.get_timeline_feed = Mock(side_effect=exception)
+        
+        # Mock successful re-login
+        instagram_client.client.login = Mock(return_value=True)
+        
+        with patch("time.sleep"):
+            with pytest.raises(PleaseWaitFewMinutes):
+                instagram_client.get_timeline_feed()
+        
+        # Login should only be called once, not retried
+        instagram_client.client.login.assert_called_once()
+    
+    def test_no_reauth_on_real_rate_limit(self, instagram_client):
+        """Test that re-authentication is NOT triggered on real rate limits."""
+        instagram_client._is_authenticated = True
+        
+        # Mock 429 rate limit (not 401)
+        mock_response = Mock()
+        mock_response.status_code = 429
+        exception = PleaseWaitFewMinutes("Please wait")
+        exception.response = mock_response
+        
+        empty_feed = {"feed_items": []}
+        instagram_client.client.get_timeline_feed = Mock(
+            side_effect=[exception, exception, empty_feed]
+        )
+        
+        # Mock login (should not be called)
+        instagram_client.client.login = Mock()
+        
+        with patch("time.sleep"):
+            posts = instagram_client.get_timeline_feed()
+        
+        # Should succeed after retries
+        assert posts == []
+        # Login should NOT be called (real rate limit, not auth error)
+        instagram_client.client.login.assert_not_called()
+        # Should retry the normal way
+        assert instagram_client.client.get_timeline_feed.call_count == 3
+    
+    def test_auto_reauth_on_login_required_exception(self, instagram_client):
+        """Test automatic re-authentication on LoginRequired exception."""
+        instagram_client._is_authenticated = True
+        
+        empty_feed = {"feed_items": []}
+        instagram_client.client.get_timeline_feed = Mock(
+            side_effect=[LoginRequired("Login required"), empty_feed]
+        )
+        
+        # Mock successful re-login
+        instagram_client.client.login = Mock(return_value=True)
+        
+        with patch("time.sleep"):
+            posts = instagram_client.get_timeline_feed()
+        
+        # Should succeed after re-auth
+        assert posts == []
+        instagram_client.client.login.assert_called_once()
+        assert instagram_client.client.get_timeline_feed.call_count == 2

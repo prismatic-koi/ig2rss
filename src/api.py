@@ -396,9 +396,17 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
         # Warn on every sync if limiting is active
         if config.MAX_ACCOUNTS_TO_FETCH > 0:
             logger.warning(
-                f"⚠️  Account limit active: MAX_ACCOUNTS_TO_FETCH={config.MAX_ACCOUNTS_TO_FETCH} "
+                f"Account limit active: MAX_ACCOUNTS_TO_FETCH={config.MAX_ACCOUNTS_TO_FETCH} "
                 f"(set to 0 for unlimited)"
             )
+        
+        # Validate session before starting sync
+        if not client.validate_session():
+            logger.warning("Session validation failed. Attempting to re-authenticate...")
+            if not client.login():
+                logger.error("Failed to re-authenticate. Aborting sync.")
+                return
+            logger.info("Re-authentication successful. Proceeding with sync.")
         
         # Refresh following list (respects cache TTL)
         following_accounts = following_manager.get_following_list()
@@ -416,7 +424,7 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
             logger.info("No accounts to poll this cycle")
             return
         
-        logger.info(f"📊 Cycle {polling_manager.current_cycle}: Polling {len(accounts_to_poll)} accounts")
+        logger.info(f"Cycle {polling_manager.current_cycle}: Polling {len(accounts_to_poll)} accounts")
         
         # Poll each account
         total_new_posts = 0
@@ -472,13 +480,22 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
         
         # Log summary
         stats = polling_manager.get_priority_stats()
+        reauth_metrics = client.get_reauth_metrics()
+        
         logger.info("=" * 70)
-        logger.info(f"📊 Sync complete:")
-        logger.info(f"   🔢 Cycle: {stats['cycle']}")
-        logger.info(f"   📥 Accounts polled: {len(accounts_to_poll)}")
-        logger.info(f"   ✅ Accounts with new posts: {accounts_with_new_posts}")
-        logger.info(f"   💾 New posts saved: {total_new_posts}")
-        logger.info(f"   📈 Priority distribution:")
+        logger.info(f"Sync complete:")
+        logger.info(f"   Cycle: {stats['cycle']}")
+        logger.info(f"   Accounts polled: {len(accounts_to_poll)}")
+        logger.info(f"   Accounts with new posts: {accounts_with_new_posts}")
+        logger.info(f"   New posts saved: {total_new_posts}")
+        
+        # Log re-authentication metrics if any re-auth occurred
+        if reauth_metrics['reauth_attempts'] > 0:
+            logger.info(f"   Re-auth attempts: {reauth_metrics['reauth_attempts']}")
+            logger.info(f"   Re-auth successes: {reauth_metrics['reauth_successes']}")
+            logger.info(f"   Re-auth failures: {reauth_metrics['reauth_failures']}")
+        
+        logger.info(f"   Priority distribution:")
         for priority, count in stats['distribution'].items():
             logger.info(f"      {priority}: {count} accounts")
         logger.info("=" * 70)
