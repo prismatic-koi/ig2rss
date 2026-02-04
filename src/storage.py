@@ -533,6 +533,58 @@ class StorageManager:
             logger.error(f"Failed to get following cache age: {e}")
             return None
     
+    def is_account_private(self, user_id: str) -> Optional[bool]:
+        """Check if account is known to be private.
+        
+        Args:
+            user_id: Instagram user ID
+            
+        Returns:
+            True if known private, False if known public, None if unknown
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT is_private 
+                    FROM following_accounts
+                    WHERE user_id = ?
+                """, (user_id,))
+                row = cursor.fetchone()
+                return row['is_private'] if row else None
+                
+        except Exception as e:
+            logger.error(f"Failed to check if account {user_id} is private: {e}")
+            return None
+    
+    def update_account_private_status(self, user_id: str, is_private: bool) -> bool:
+        """Update the is_private flag for an account.
+        
+        Args:
+            user_id: Instagram user ID
+            is_private: Whether account is private
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE following_accounts 
+                    SET is_private = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ?
+                """, (is_private, user_id))
+                
+                if cursor.rowcount > 0:
+                    logger.debug(f"Updated is_private={is_private} for user_id={user_id}")
+                    return True
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to update private status for {user_id}: {e}")
+            return False
+    
     # ============================================================================
     # Account Activity Methods (Phase 1: Smart Polling)
     # ============================================================================

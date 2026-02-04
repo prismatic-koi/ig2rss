@@ -52,7 +52,8 @@ class InstagramClient:
         username: str, 
         password: str, 
         session_file: Optional[str] = None,
-        totp_seed: Optional[str] = None
+        totp_seed: Optional[str] = None,
+        storage = None
     ):
         """Initialize Instagram client with credentials.
         
@@ -61,11 +62,13 @@ class InstagramClient:
             password: Instagram password
             session_file: Path to session file for persistence (optional)
             totp_seed: TOTP seed for 2FA authentication (optional)
+            storage: StorageManager instance for caching account metadata (optional)
         """
         self.username = username
         self.password = password
         self.session_file = session_file
         self.totp_seed = totp_seed
+        self.storage = storage
         self.client = Client()
         self._is_authenticated = False
         
@@ -753,7 +756,22 @@ class InstagramClient:
             
             # Step 1: Get user info (media count)
             try:
-                user_info = self.client.user_info(user_id)
+                # Check if account is known to be private (avoids failed public API attempts)
+                is_private = self.storage.is_account_private(user_id) if self.storage else None
+                
+                if is_private:
+                    # Use private API directly for known private accounts (skip public GraphQL attempt)
+                    logger.debug(f"@{username} is known private, using private API")
+                    user_info = self.client.user_info_v1(user_id)
+                else:
+                    # Use standard method (tries public first, falls back to private)
+                    user_info = self.client.user_info(user_id)
+                
+                # Update is_private cache if it changed
+                if self.storage and user_info.is_private != is_private:
+                    logger.debug(f"@{username} privacy status changed to {user_info.is_private}")
+                    self.storage.update_account_private_status(user_id, user_info.is_private)
+                
                 metadata['media_count'] = user_info.media_count
                 
                 logger.debug(f"@{username} has {metadata['media_count']} total posts")

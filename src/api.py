@@ -253,7 +253,8 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
             username=config.INSTAGRAM_USERNAME,
             password=config.INSTAGRAM_PASSWORD,
             session_file=config.SESSION_FILE,
-            totp_seed=config.INSTAGRAM_2FA_SEED
+            totp_seed=config.INSTAGRAM_2FA_SEED,
+            storage=storage
         )
         
         # Login
@@ -574,7 +575,8 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
             username=config.INSTAGRAM_USERNAME,
             password=config.INSTAGRAM_PASSWORD,
             session_file=config.SESSION_FILE,
-            totp_seed=config.INSTAGRAM_2FA_SEED
+            totp_seed=config.INSTAGRAM_2FA_SEED,
+            storage=storage
         )
         
         # Login
