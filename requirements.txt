@@ -1,7 +1,7 @@
 # Core dependencies for ig2rss
 
 # Instagram API client
-instagrapi>=2.1.2
+instagrapi>=2.2.1
 
 # HTTP requests (for media downloads)
 requests>=2.31.0
