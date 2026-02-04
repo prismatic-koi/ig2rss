@@ -219,8 +219,8 @@ class InstagramClient:
             return False
         
         try:
-            # Quick lightweight check - fetch just 1 item from timeline
-            self.client.get_timeline_feed(count=1)
+            # Quick lightweight check - fetch account info (minimal data transfer)
+            self.client.account_info()
             logger.debug("Session validation successful")
             return True
         except (LoginRequired, PleaseWaitFewMinutes) as e:

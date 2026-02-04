@@ -613,12 +613,12 @@ class TestInstagramClientValidateSession:
     def test_validate_session_success(self, instagram_client):
         """Test validate_session returns True when session is valid."""
         instagram_client._is_authenticated = True
-        instagram_client.client.get_timeline_feed = Mock(return_value={"feed_items": []})
+        instagram_client.client.account_info = Mock(return_value=Mock(pk="123"))
         
         result = instagram_client.validate_session()
         
         assert result is True
-        instagram_client.client.get_timeline_feed.assert_called_once_with(count=1)
+        instagram_client.client.account_info.assert_called_once_with()
     
     def test_validate_session_expired_401(self, instagram_client):
         """Test validate_session detects expired session (401)."""
@@ -630,7 +630,7 @@ class TestInstagramClientValidateSession:
         exception = PleaseWaitFewMinutes("Please wait")
         exception.response = mock_response
         
-        instagram_client.client.get_timeline_feed = Mock(side_effect=exception)
+        instagram_client.client.account_info = Mock(side_effect=exception)
         
         result = instagram_client.validate_session()
         
@@ -647,7 +647,7 @@ class TestInstagramClientValidateSession:
         exception = PleaseWaitFewMinutes("Please wait")
         exception.response = mock_response
         
-        instagram_client.client.get_timeline_feed = Mock(side_effect=exception)
+        instagram_client.client.account_info = Mock(side_effect=exception)
         
         result = instagram_client.validate_session()
         
@@ -658,7 +658,7 @@ class TestInstagramClientValidateSession:
     def test_validate_session_login_required(self, instagram_client):
         """Test validate_session detects LoginRequired exception."""
         instagram_client._is_authenticated = True
-        instagram_client.client.get_timeline_feed = Mock(
+        instagram_client.client.account_info = Mock(
             side_effect=LoginRequired("Login required")
         )
         
@@ -670,7 +670,7 @@ class TestInstagramClientValidateSession:
     def test_validate_session_unexpected_error(self, instagram_client):
         """Test validate_session handles unexpected errors gracefully."""
         instagram_client._is_authenticated = True
-        instagram_client.client.get_timeline_feed = Mock(
+        instagram_client.client.account_info = Mock(
             side_effect=RuntimeError("Unexpected")
         )
         
