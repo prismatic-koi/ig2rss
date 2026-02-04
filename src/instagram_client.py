@@ -111,9 +111,9 @@ class InstagramClient:
                 self.client.load_settings(self.session_file)
                 self.client.login(self.username, self.password)
                 
-                # Verify session is valid by checking timeline
+                # Verify session is valid by checking account info
                 try:
-                    self.client.get_timeline_feed()
+                    self.client.account_info()
                     logger.info("Session is valid, logged in successfully")
                     self._is_authenticated = True
                     return True
