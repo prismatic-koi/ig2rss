@@ -29,6 +29,30 @@ from instagrapi.extractors import extract_media_v1
 logger = logging.getLogger(__name__)
 
 
+# Modern device fingerprint - Samsung Galaxy S24 (2024), Android 14, recent Instagram version.
+# The default instagrapi device (OnePlus 6T Dev, Android 8, IG 269) is a fictional device
+# that Instagram has likely blacklisted. Using a real, popular device avoids instant challenges.
+# NOTE: This must be applied AFTER load_settings() since that overwrites device settings.
+DEVICE_SETTINGS = {
+    "app_version": "364.0.0.35.86",
+    "android_version": 34,             # Android 14
+    "android_release": "14",
+    "dpi": "480dpi",
+    "resolution": "1080x2340",
+    "manufacturer": "samsung",
+    "device": "e2s",                   # Galaxy S24 codename
+    "model": "SM-S921B",               # Galaxy S24 (international)
+    "cpu": "s5e9945",                  # Exynos 2400
+    "version_code": "374010953",
+}
+
+# bloks_versioning_id changes with each Instagram app version.
+# This value corresponds to app_version 364.0.0.35.86 (from instagrapi PR #2362).
+BLOKS_VERSIONING_ID = (
+    "8ccf54aad76788a6ca03ddfc33afcdcf692f2f5a3ba814ea73d5facba7fa2c2d"
+)
+
+
 class InstagramChallengeError(Exception):
     """Raised when Instagram is challenging the account.
     
@@ -82,6 +106,10 @@ class InstagramClient:
         self.client = Client()
         self._is_authenticated = False
         
+        # Apply modern device fingerprint (before login, but will be re-applied after
+        # load_settings() since that overwrites device settings)
+        self._apply_device_fingerprint()
+        
         # Override login_flow to handle challenges gracefully
         # The login itself succeeds, but Instagram may require challenges during
         # the post-login flow (reels_tray, timeline). We should not fail the entire
@@ -120,6 +148,23 @@ class InstagramClient:
         if totp_seed:
             logger.info("2FA TOTP seed provided for authentication")
     
+    def _apply_device_fingerprint(self) -> None:
+        """Apply the modern device fingerprint to the instagrapi client.
+        
+        This sets the device settings, regenerates the user agent string
+        to match, and updates the bloks_versioning_id for the app version.
+        Must be called after any operation that might overwrite device
+        settings (e.g. load_settings / init).
+        """
+        self.client.set_device(DEVICE_SETTINGS)
+        self.client.set_user_agent()  # regenerate UA from new device settings
+        self.client.bloks_versioning_id = BLOKS_VERSIONING_ID
+        logger.debug(
+            f"Device fingerprint applied: {DEVICE_SETTINGS['manufacturer']} "
+            f"{DEVICE_SETTINGS['model']} (Android {DEVICE_SETTINGS['android_release']}, "
+            f"IG {DEVICE_SETTINGS['app_version']})"
+        )
+    
     def login(self) -> bool:
         """Authenticate with Instagram using session or credentials.
         
@@ -143,6 +188,22 @@ class InstagramClient:
             try:
                 logger.info("Attempting to login using saved session")
                 self.client.load_settings(self.session_file)
+                
+                # load_settings() overwrites device settings from the saved session.
+                # Check if the saved device differs from our target device and
+                # force new UUIDs if so (old UUIDs tied to old device look suspicious).
+                saved_device = self.client.device_settings or {}
+                if saved_device.get("model") != DEVICE_SETTINGS["model"]:
+                    logger.info(
+                        f"Saved session has device '{saved_device.get('model', 'unknown')}', "
+                        f"switching to '{DEVICE_SETTINGS['model']}' with new UUIDs"
+                    )
+                    self._apply_device_fingerprint()
+                    self.client.set_uuids({})  # generate fresh UUIDs for new device
+                else:
+                    # Same device, just ensure settings are applied consistently
+                    self._apply_device_fingerprint()
+                
                 self.client.login(self.username, self.password)
                 
                 # Verify session is valid by checking account info
