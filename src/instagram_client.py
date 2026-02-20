@@ -29,6 +29,16 @@ from instagrapi.extractors import extract_media_v1
 logger = logging.getLogger(__name__)
 
 
+class InstagramChallengeError(Exception):
+    """Raised when Instagram is challenging the account.
+    
+    This is distinct from transient errors -- it means the account
+    is blocked/flagged and continuing to make API calls will make it worse.
+    The caller should stop the polling cycle immediately.
+    """
+    pass
+
+
 @dataclass
 class InstagramPost:
     """Represents a post from the Instagram feed."""
@@ -292,6 +302,54 @@ class InstagramClient:
         
         return False
     
+    def _is_challenge_error(self, exception: Exception) -> bool:
+        """Detect if an exception is caused by an Instagram challenge.
+        
+        Instagram challenges often manifest as JSONDecodeError when the
+        challenge resolution endpoint returns an empty response body.
+        The traceback will show calls through challenge_resolve in
+        instagrapi/mixins/challenge.py.
+        
+        Args:
+            exception: Exception to check
+            
+        Returns:
+            True if this appears to be a challenge-related error
+        """
+        import traceback as tb_module
+        
+        # Direct ChallengeRequired
+        if isinstance(exception, ChallengeRequired):
+            return True
+        
+        # Check the full exception chain (__cause__ and __context__)
+        cause = exception
+        seen = set()
+        while cause is not None and id(cause) not in seen:
+            seen.add(id(cause))
+            if isinstance(cause, ChallengeRequired):
+                return True
+            
+            # Check the traceback frames of each exception in the chain
+            tb = cause.__traceback__
+            if tb:
+                formatted = tb_module.format_tb(tb)
+                tb_text = ''.join(formatted).lower()
+                if 'challenge' in tb_text:
+                    return True
+            
+            # Check error message
+            if 'challenge' in str(cause).lower():
+                return True
+            
+            # Move to the next exception in the chain
+            next_cause = getattr(cause, '__cause__', None)
+            if next_cause is None:
+                next_cause = getattr(cause, '__context__', None)
+            cause = next_cause
+        
+        return False
+    
     def get_reauth_metrics(self) -> dict:
         """Get re-authentication metrics for monitoring.
         
@@ -404,8 +462,19 @@ class InstagramClient:
                     logger.error("Re-authentication already attempted and failed")
                     raise
                 
+            except ChallengeRequired as e:
+                # Instagram is challenging us - this means the account is flagged.
+                # Continuing to make API calls will make it worse.
+                logger.error(
+                    "Instagram challenge detected! Account is flagged. "
+                    "Stopping all API calls to avoid escalating the ban."
+                )
+                raise InstagramChallengeError(
+                    "Account is being challenged by Instagram"
+                ) from e
+                
             except (ClientError, ConnectionError) as e:
-                # Network or API errors
+                # Network or API errors (ChallengeRequired already handled above)
                 wait_time = self.base_backoff * (2 ** attempt)
                 logger.warning(
                     f"Request failed: {e}. Retrying in {wait_time}s "
@@ -415,6 +484,16 @@ class InstagramClient:
                 last_exception = e
                 
             except Exception as e:
+                # Check if this is a challenge error wrapped in another exception
+                # (e.g., JSONDecodeError from failed challenge resolution)
+                if self._is_challenge_error(e):
+                    logger.error(
+                        "Instagram challenge detected (via failed challenge resolution)! "
+                        "Account is flagged. Stopping all API calls."
+                    )
+                    raise InstagramChallengeError(
+                        "Account is being challenged by Instagram"
+                    ) from e
                 # Unexpected errors - don't retry
                 logger.error(f"Unexpected error (not retrying): {e}")
                 raise
@@ -777,21 +856,18 @@ class InstagramClient:
             
             # Step 1: Get user info (media count)
             try:
-                # Check if account is known to be private (avoids failed public API attempts)
-                is_private = self.storage.is_account_private(user_id) if self.storage else None
+                # Always use private API directly (user_info_v1) to avoid the
+                # public GraphQL attempt that user_info() makes first. The public
+                # GraphQL endpoint gets blocked/rate-limited quickly and wastes
+                # a request that can trigger challenges.
+                user_info = self.client.user_info_v1(user_id)
                 
-                if is_private:
-                    # Use private API directly for known private accounts (skip public GraphQL attempt)
-                    logger.debug(f"@{username} is known private, using private API")
-                    user_info = self.client.user_info_v1(user_id)
-                else:
-                    # Use standard method (tries public first, falls back to private)
-                    user_info = self.client.user_info(user_id)
-                
-                # Update is_private cache if it changed
-                if self.storage and user_info.is_private != is_private:
-                    logger.debug(f"@{username} privacy status changed to {user_info.is_private}")
-                    self.storage.update_account_private_status(user_id, user_info.is_private)
+                # Update is_private cache
+                if self.storage:
+                    is_private = self.storage.is_account_private(user_id)
+                    if user_info.is_private != is_private:
+                        logger.debug(f"@{username} privacy status changed to {user_info.is_private}")
+                        self.storage.update_account_private_status(user_id, user_info.is_private)
                 
                 metadata['media_count'] = user_info.media_count
                 
@@ -802,7 +878,14 @@ class InstagramClient:
                     logger.debug(f"@{username} has no posts, skipping")
                     return False, [], metadata
                 
+            except InstagramChallengeError:
+                # Challenge errors must propagate up to abort the polling cycle
+                raise
             except Exception as e:
+                if self._is_challenge_error(e):
+                    raise InstagramChallengeError(
+                        f"Challenge detected while getting user info for @{username}"
+                    ) from e
                 logger.error(f"Failed to get user info for @{username}: {e}")
                 # Return empty but don't fail completely
                 return False, [], metadata
@@ -822,7 +905,13 @@ class InstagramClient:
                 
                 logger.debug(f"@{username} latest post: {latest_post_id} (date: {metadata['latest_post_date']})")
                 
+            except InstagramChallengeError:
+                raise
             except Exception as e:
+                if self._is_challenge_error(e):
+                    raise InstagramChallengeError(
+                        f"Challenge detected while fetching latest post for @{username}"
+                    ) from e
                 logger.error(f"Failed to fetch latest post for @{username}: {e}", exc_info=True)
                 return False, [], metadata
             
@@ -846,7 +935,13 @@ class InstagramClient:
                 logger.info(f"@{username}: Fetched {len(posts)} recent posts")
                 return True, posts, metadata
                 
+            except InstagramChallengeError:
+                raise
             except Exception as e:
+                if self._is_challenge_error(e):
+                    raise InstagramChallengeError(
+                        f"Challenge detected while fetching recent posts for @{username}"
+                    ) from e
                 logger.error(f"Failed to fetch recent posts for @{username}: {e}", exc_info=True)
                 # Return the latest post data we have
                 return True, [], metadata

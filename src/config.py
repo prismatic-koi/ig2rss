@@ -41,6 +41,9 @@ class Config:
     POSTS_PER_USER: int = int(os.getenv("POSTS_PER_USER", "20"))
     MAX_ACCOUNTS_TO_FETCH: int = int(os.getenv("MAX_ACCOUNTS_TO_FETCH", "0"))  # 0 = unlimited
     
+    # Delay between checking accounts (seconds, randomized +/- 50%)
+    ACCOUNT_CHECK_DELAY: int = int(os.getenv("ACCOUNT_CHECK_DELAY", "4"))
+    
     # Following List Cache
     FOLLOWING_CACHE_HOURS: int = int(os.getenv("FOLLOWING_CACHE_HOURS", "24"))
     

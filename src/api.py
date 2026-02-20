@@ -7,6 +7,7 @@ downloaded media files. It also manages background sync tasks.
 import os
 import logging
 import time
+import random
 from pathlib import Path
 from typing import Optional, Type, List
 from datetime import datetime
@@ -18,7 +19,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from src.config import Config
 from src.storage import StorageManager
 from src.rss_generator import RSSGenerator
-from src.instagram_client import InstagramClient, InstagramPost
+from src.instagram_client import InstagramClient, InstagramPost, InstagramChallengeError
 from src.following_manager import FollowingManager, FollowedAccount
 from src.account_polling_manager import AccountPollingManager
 
@@ -316,6 +317,10 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
             
             # Fetch 1 post from each account to determine priority
             posts_by_account = {}
+            challenge_abort = False
+            consecutive_failures = 0
+            max_consecutive_failures = 3
+            
             for idx, account in enumerate(following_accounts, 1):
                 try:
                     logger.info(f"[{idx}/{len(following_accounts)}] Checking @{account.username}...")
@@ -325,6 +330,9 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                         username=account.username,
                         last_known_post_id=None  # First sync, no known posts
                     )
+                    
+                    # Reset consecutive failure counter on success
+                    consecutive_failures = 0
                     
                     if posts:
                         posts_by_account[account.username] = [
@@ -341,15 +349,34 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                                 storage.save_post(post)
                                 _download_post_media(post, storage, client)
                     
-                    # Small delay between accounts
-                    time.sleep(1)
+                    # Randomized delay between accounts to look more human
+                    delay = config.ACCOUNT_CHECK_DELAY * random.uniform(0.5, 1.5)
+                    time.sleep(delay)
+                    
+                except InstagramChallengeError as e:
+                    logger.error(
+                        f"CHALLENGE DETECTED during first sync at @{account.username}! "
+                        f"Aborting to avoid escalating the ban. "
+                        f"Checked {idx - 1}/{len(following_accounts)} accounts."
+                    )
+                    challenge_abort = True
+                    break
                     
                 except Exception as e:
+                    consecutive_failures += 1
                     logger.error(
                         f"Failed to check @{account.username}: {e}",
-                        exc_info=True  # Include full traceback for debugging
+                        exc_info=True
                     )
                     posts_by_account[account.username] = []
+                    
+                    if consecutive_failures >= max_consecutive_failures:
+                        logger.error(
+                            f"ABORT: {consecutive_failures} consecutive failures "
+                            f"during first sync. Instagram is likely blocking this session."
+                        )
+                        challenge_abort = True
+                        break
             
             # Initialize activity profiles
             distribution = polling_manager.initialize_activity_profiles(
@@ -430,6 +457,10 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
         # Poll each account
         total_new_posts = 0
         accounts_with_new_posts = 0
+        accounts_checked = 0
+        challenge_abort = False
+        consecutive_failures = 0
+        max_consecutive_failures = 3  # Abort after 3 consecutive failures
         
         for idx, activity in enumerate(accounts_to_poll, 1):
             try:
@@ -447,6 +478,10 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                     username=username,
                     last_known_post_id=last_post_id
                 )
+                
+                # Reset consecutive failure counter on success
+                consecutive_failures = 0
+                accounts_checked += 1
                 
                 if has_new and posts:
                     accounts_with_new_posts += 1
@@ -470,23 +505,49 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                     metadata=metadata
                 )
                 
-                # Delay between accounts
-                time.sleep(1)
+                # Randomized delay between accounts to look more human
+                delay = config.ACCOUNT_CHECK_DELAY * random.uniform(0.5, 1.5)
+                time.sleep(delay)
+                
+            except InstagramChallengeError as e:
+                logger.error(
+                    f"CHALLENGE DETECTED while checking @{activity['username']}! "
+                    f"Aborting polling cycle to avoid escalating the ban. "
+                    f"Checked {accounts_checked}/{len(accounts_to_poll)} accounts "
+                    f"before challenge."
+                )
+                challenge_abort = True
+                break
                 
             except Exception as e:
+                consecutive_failures += 1
                 logger.error(
                     f"Failed to check @{activity['username']}: {e}",
-                    exc_info=True  # Include full traceback for debugging
+                    exc_info=True
                 )
+                
+                # If we're getting consecutive failures, Instagram may be
+                # blocking us without explicit challenges
+                if consecutive_failures >= max_consecutive_failures:
+                    logger.error(
+                        f"ABORT: {consecutive_failures} consecutive failures. "
+                        f"Instagram is likely blocking this session. "
+                        f"Stopping polling cycle to avoid making it worse."
+                    )
+                    challenge_abort = True
+                    break
         
         # Log summary
         stats = polling_manager.get_priority_stats()
         reauth_metrics = client.get_reauth_metrics()
         
         logger.info("=" * 70)
-        logger.info(f"Sync complete:")
+        if challenge_abort:
+            logger.info(f"Sync ABORTED (challenge/block detected):")
+        else:
+            logger.info(f"Sync complete:")
         logger.info(f"   Cycle: {stats['cycle']}")
-        logger.info(f"   Accounts polled: {len(accounts_to_poll)}")
+        logger.info(f"   Accounts polled: {accounts_checked}/{len(accounts_to_poll)}")
         logger.info(f"   Accounts with new posts: {accounts_with_new_posts}")
         logger.info(f"   New posts saved: {total_new_posts}")
         
