@@ -140,6 +140,7 @@ class StorageManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (user_id) REFERENCES following_accounts(user_id)
+                        ON DELETE CASCADE
                 )
             """)
             
@@ -192,6 +193,59 @@ class StorageManager:
                 CREATE INDEX IF NOT EXISTS idx_activity_last_post_date 
                 ON account_activity(last_post_date DESC)
             """)
+            
+            # Migration: ensure account_activity FK has ON DELETE CASCADE.
+            # SQLite can't ALTER foreign keys, so we must recreate the table.
+            # Check if the existing table is missing CASCADE by inspecting the DDL.
+            cursor.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='account_activity'"
+            )
+            row = cursor.fetchone()
+            if row and row[0] and "ON DELETE CASCADE" not in row[0].upper():
+                logger.info(
+                    "Migrating account_activity table to add "
+                    "ON DELETE CASCADE to foreign key"
+                )
+                cursor.execute("""
+                    CREATE TABLE account_activity_new (
+                        user_id TEXT PRIMARY KEY,
+                        username TEXT NOT NULL,
+                        media_count INTEGER DEFAULT 0,
+                        last_post_id TEXT,
+                        last_post_date TIMESTAMP,
+                        last_checked TIMESTAMP NOT NULL,
+                        poll_priority TEXT DEFAULT 'normal',
+                        consecutive_no_new_posts INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (user_id) REFERENCES following_accounts(user_id)
+                            ON DELETE CASCADE
+                    )
+                """)
+                cursor.execute("""
+                    INSERT INTO account_activity_new
+                    SELECT * FROM account_activity
+                """)
+                cursor.execute("DROP TABLE account_activity")
+                cursor.execute(
+                    "ALTER TABLE account_activity_new "
+                    "RENAME TO account_activity"
+                )
+                # Recreate indexes on the new table
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_activity_last_checked 
+                    ON account_activity(last_checked)
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_activity_priority 
+                    ON account_activity(poll_priority)
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_activity_last_post_date 
+                    ON account_activity(last_post_date DESC)
+                """)
+                logger.info("Migration complete: account_activity now has ON DELETE CASCADE")
             
             logger.info("Database schema initialized successfully")
     
@@ -445,8 +499,9 @@ class StorageManager:
     def save_following_accounts(self, accounts: List[Dict[str, Any]]) -> bool:
         """Save or update following accounts list.
         
-        Replaces the entire following list with the provided accounts.
-        Accounts not in the list will be removed.
+        Uses upsert for accounts in the list and removes accounts that are
+        no longer followed. This preserves account_activity data for accounts
+        that remain (CASCADE only removes activity for unfollowed accounts).
         
         Args:
             accounts: List of account dicts with keys: user_id, username, full_name, is_private
@@ -458,15 +513,21 @@ class StorageManager:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # Clear existing following accounts first (full replace)
-                cursor.execute("DELETE FROM following_accounts")
-                
                 now = datetime.now()
+                new_user_ids = set()
+                
                 for account in accounts:
+                    new_user_ids.add(account['user_id'])
                     cursor.execute("""
                         INSERT INTO following_accounts 
                         (user_id, username, full_name, is_private, last_checked, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(user_id) DO UPDATE SET
+                            username = excluded.username,
+                            full_name = excluded.full_name,
+                            is_private = excluded.is_private,
+                            last_checked = excluded.last_checked,
+                            updated_at = excluded.updated_at
                     """, (
                         account['user_id'],
                         account['username'],
@@ -475,6 +536,18 @@ class StorageManager:
                         now,
                         now
                     ))
+                
+                # Remove accounts no longer followed (CASCADE deletes their activity)
+                if new_user_ids:
+                    placeholders = ','.join('?' * len(new_user_ids))
+                    cursor.execute(
+                        f"DELETE FROM following_accounts "
+                        f"WHERE user_id NOT IN ({placeholders})",
+                        list(new_user_ids)
+                    )
+                    removed = cursor.rowcount
+                    if removed > 0:
+                        logger.info(f"Removed {removed} unfollowed accounts")
                 
                 logger.info(f"Saved {len(accounts)} following accounts")
                 return True
