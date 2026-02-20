@@ -13,7 +13,7 @@ import base64
 import requests
 from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from instagrapi import Client
@@ -42,6 +42,27 @@ class InstagramPost:
     author_full_name: Optional[str]  # Display name
     media_urls: List[str]  # URLs to media files
     media_types: List[str]  # 'image' or 'video' for each media_urls item
+
+
+@dataclass
+class InstagramStory:
+    """Represents an Instagram story."""
+    
+    id: str                           # Story media ID
+    user_id: str                      # Author's user ID
+    username: str                     # Author's username
+    full_name: Optional[str]          # Author's full name
+    taken_at: datetime                # When story was posted
+    expires_at: datetime              # When story expires (taken_at + 24h)
+    media_url: str                    # Story media URL
+    media_type: str                   # 'image' or 'video'
+    permalink: str                    # Instagram story URL
+    
+    # Text content fields
+    poll_question: Optional[str] = None
+    poll_options: Optional[List[str]] = None
+    link_text: Optional[str] = None
+    sticker_text: Optional[Dict[str, Any]] = None
 
 
 class InstagramClient:
@@ -850,6 +871,192 @@ class InstagramClient:
                 logger.error(f"Failed to fetch recent posts for @{username}: {e}", exc_info=True)
                 # Return the latest post data we have
                 return True, [], metadata
+        
+        return self._retry_with_backoff(_check)
+    
+    # ============================================================================
+    # Story Methods (Phase 2: Stories Support)
+    # ============================================================================
+    
+    def check_story_mute_status(self, user_id: str) -> bool:
+        """Check if stories are muted for a user.
+        
+        Args:
+            user_id: Instagram user ID
+            
+        Returns:
+            True if stories are muted, False otherwise
+        """
+        try:
+            relationship = self.client.user_friendship_v1(user_id)
+            is_muted = relationship.is_muting_reel
+            logger.debug(f"User {user_id} story mute status: {is_muted}")
+            return is_muted
+        except Exception as e:
+            logger.error(f"Failed to check mute status for {user_id}: {e}")
+            # Assume not muted on error (err on side of fetching)
+            return False
+    
+    def fetch_user_stories(
+        self, 
+        user_id: str, 
+        username: str
+    ) -> List[InstagramStory]:
+        """Fetch all current stories from a user.
+        
+        Args:
+            user_id: Instagram user ID
+            username: Instagram username (for logging)
+            
+        Returns:
+            List of InstagramStory objects
+        """
+        logger.debug(f"Fetching stories from @{username}")
+        
+        def _fetch():
+            try:
+                # Use instagrapi's user_stories method
+                stories = self.client.user_stories(user_id)
+                
+                if not stories:
+                    logger.debug(f"@{username} has no current stories")
+                    return []
+                
+                instagram_stories = []
+                for story in stories:
+                    converted = self._convert_story_to_instagram_story(story)
+                    if converted:
+                        instagram_stories.append(converted)
+                
+                logger.info(f"@{username}: Fetched {len(instagram_stories)} stories")
+                return instagram_stories
+                
+            except Exception as e:
+                logger.error(f"Failed to fetch stories for @{username}: {e}")
+                return []
+        
+        return self._retry_with_backoff(_fetch)
+    
+    def _convert_story_to_instagram_story(self, story) -> Optional[InstagramStory]:
+        """Convert instagrapi Story object to InstagramStory.
+        
+        Extracts text content from polls, links, and stickers.
+        
+        Args:
+            story: instagrapi Story object
+            
+        Returns:
+            InstagramStory or None if conversion fails
+        """
+        try:
+            # Determine media URL and type
+            if story.media_type == 1:  # Image
+                media_url = str(story.thumbnail_url) if story.thumbnail_url else ""
+                media_type = "image"
+            elif story.media_type == 2:  # Video
+                media_url = str(story.video_url) if story.video_url else ""
+                media_type = "video"
+            else:
+                logger.warning(f"Unknown story media type: {story.media_type}")
+                return None
+            
+            # Calculate expiration (24 hours from taken_at)
+            expires_at = story.taken_at + timedelta(hours=24)
+            
+            # Build permalink
+            permalink = f"https://www.instagram.com/stories/{story.user.username}/{story.pk}/"
+            
+            # Extract text content from polls
+            poll_question = None
+            poll_options = None
+            if hasattr(story, 'story_polls') and story.story_polls and len(story.story_polls) > 0:
+                poll = story.story_polls[0]  # First poll
+                poll_question = poll.question if hasattr(poll, 'question') else None
+                if hasattr(poll, 'tallies') and poll.tallies:
+                    poll_options = [tally.text for tally in poll.tallies if hasattr(tally, 'text')]
+            
+            # Extract text content from link stickers
+            link_text = None
+            sticker_text = {}
+            if hasattr(story, 'story_stickers') and story.story_stickers:
+                for sticker in story.story_stickers:
+                    # Link sticker
+                    if hasattr(sticker, 'story_link') and sticker.story_link:
+                        if hasattr(sticker.story_link, 'link_title'):
+                            link_text = sticker.story_link.link_title
+                    
+                    # Other stickers with extra data
+                    if hasattr(sticker, 'extra') and isinstance(sticker.extra, dict):
+                        sticker_type = sticker.type if hasattr(sticker, 'type') else "unknown"
+                        sticker_text[sticker_type] = sticker.extra
+            
+            return InstagramStory(
+                id=str(story.pk),
+                user_id=str(story.user.pk),
+                username=story.user.username,
+                full_name=story.user.full_name if hasattr(story.user, 'full_name') and story.user.full_name else None,
+                taken_at=story.taken_at,
+                expires_at=expires_at,
+                media_url=media_url,
+                media_type=media_type,
+                permalink=permalink,
+                poll_question=poll_question,
+                poll_options=poll_options if poll_options else None,
+                link_text=link_text,
+                sticker_text=sticker_text if sticker_text else None
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to convert story to InstagramStory: {e}")
+            return None
+    
+    def check_account_for_new_stories(
+        self,
+        user_id: str,
+        username: str,
+        last_known_story_id: Optional[str] = None
+    ) -> Tuple[bool, List[InstagramStory], Dict[str, Any]]:
+        """Efficiently check if account has new stories.
+        
+        CRITICAL: This should ONLY be called if stories are NOT muted.
+        
+        Args:
+            user_id: Instagram user ID
+            username: Instagram username
+            last_known_story_id: ID of last story we fetched
+            
+        Returns:
+            Tuple of (has_new_stories, new_stories_list, metadata)
+        """
+        logger.debug(f"Checking @{username} for new stories")
+        
+        def _check():
+            metadata: Dict[str, Any] = {
+                'latest_story_id': None,
+                'latest_story_date': None,
+                'story_count': 0
+            }
+            
+            # Fetch current stories
+            stories = self.fetch_user_stories(user_id, username)
+            
+            if not stories:
+                return False, [], metadata
+            
+            # Update metadata
+            # Stories are ordered by taken_at (newest first from Instagram)
+            latest_story = stories[0]
+            metadata['latest_story_id'] = latest_story.id
+            metadata['latest_story_date'] = latest_story.taken_at
+            metadata['story_count'] = len(stories)
+            
+            # Check if we have new stories
+            if last_known_story_id and latest_story.id == last_known_story_id:
+                logger.debug(f"@{username}: No new stories")
+                return False, [], metadata
+            
+            logger.info(f"@{username}: {len(stories)} stories detected")
+            return True, stories, metadata
         
         return self._retry_with_backoff(_check)
     

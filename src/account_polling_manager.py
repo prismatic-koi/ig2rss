@@ -8,7 +8,7 @@ activity patterns. It uses a hybrid approach:
 
 import logging
 from typing import List, Dict, Any, Optional, Set
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .storage import StorageManager
 from .following_manager import FollowedAccount
@@ -182,11 +182,13 @@ class AccountPollingManager:
         if last_post_date is None:
             return 'dormant'
         
-        # Handle timezone-aware datetimes from Instagram
-        if last_post_date.tzinfo is not None:
-            last_post_date = last_post_date.replace(tzinfo=None)
+        # Ensure both datetimes are timezone-aware for correct comparison
+        now = datetime.now(timezone.utc)
+        if last_post_date.tzinfo is None:
+            # Assume UTC if no timezone info
+            last_post_date = last_post_date.replace(tzinfo=timezone.utc)
         
-        days_since_post = (datetime.now() - last_post_date).days
+        days_since_post = (now - last_post_date).days
         
         if days_since_post <= self.priority_normal_days:
             # Conservative: Recent posters start as normal
@@ -343,11 +345,12 @@ class AccountPollingManager:
         if has_new_posts:
             last_post_date = metadata.get('latest_post_date')
             if last_post_date:
-                # Handle timezone-aware datetimes
-                if hasattr(last_post_date, 'tzinfo') and last_post_date.tzinfo is not None:
-                    last_post_date = last_post_date.replace(tzinfo=None)
+                # Ensure both datetimes are timezone-aware for correct comparison
+                now = datetime.now(timezone.utc)
+                if hasattr(last_post_date, 'tzinfo') and last_post_date.tzinfo is None:
+                    last_post_date = last_post_date.replace(tzinfo=timezone.utc)
                 
-                days_since_post = (datetime.now() - last_post_date).days
+                days_since_post = (now - last_post_date).days
                 
                 if days_since_post <= self.priority_high_days:
                     return 'high'
@@ -362,11 +365,12 @@ class AccountPollingManager:
             if isinstance(last_post_date, str):
                 last_post_date = datetime.fromisoformat(last_post_date)
             
-            # Handle timezone-aware datetimes
-            if hasattr(last_post_date, 'tzinfo') and last_post_date.tzinfo is not None:
-                last_post_date = last_post_date.replace(tzinfo=None)
+            # Ensure both datetimes are timezone-aware for correct comparison
+            now = datetime.now(timezone.utc)
+            if hasattr(last_post_date, 'tzinfo') and last_post_date.tzinfo is None:
+                last_post_date = last_post_date.replace(tzinfo=timezone.utc)
             
-            days_since_post = (datetime.now() - last_post_date).days
+            days_since_post = (now - last_post_date).days
             
             if days_since_post <= self.priority_high_days:
                 return 'high'

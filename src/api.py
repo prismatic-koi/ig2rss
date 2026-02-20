@@ -18,9 +18,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 from src.config import Config
 from src.storage import StorageManager
 from src.rss_generator import RSSGenerator
-from src.instagram_client import InstagramClient, InstagramPost
+from src.instagram_client import InstagramClient, InstagramPost, InstagramStory
 from src.following_manager import FollowingManager, FollowedAccount
 from src.account_polling_manager import AccountPollingManager
+from src.story_polling_manager import StoryPollingManager
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,7 @@ def register_routes(app: Flask):
             'service': 'ig2rss',
             'database': {
                 'posts': stats.get('post_count', 0),
+                'stories': stats.get('story_count', 0),
                 'media': stats.get('media_count', 0),
                 'downloaded': stats.get('downloaded_count', 0),
             }
@@ -128,10 +130,15 @@ def register_routes(app: Flask):
         # Fetch posts from storage
         posts = storage.get_recent_posts(limit=limit, days=days)
         
-        # Generate RSS feed
-        rss_xml = rss_generator.generate_feed(posts, limit=limit, days=days)
+        # Fetch stories from storage (if story polling is enabled)
+        stories = []
+        if config.STORY_POLLING_ENABLED:
+            stories = storage.get_recent_stories(limit=limit, days=days)
         
-        logger.info(f"Served RSS feed: {len(posts)} posts (limit={limit}, days={days})")
+        # Generate RSS feed with both posts and stories
+        rss_xml = rss_generator.generate_feed(posts, stories=stories, limit=limit, days=days)
+        
+        logger.info(f"Served RSS feed: {len(posts)} posts, {len(stories)} stories (limit={limit}, days={days})")
         
         return Response(rss_xml, mimetype='application/rss+xml')
     
@@ -500,6 +507,10 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
         for priority, count in stats['distribution'].items():
             logger.info(f"      {priority}: {count} accounts")
         logger.info("=" * 70)
+        
+        # Story sync (if enabled)
+        if config.STORY_POLLING_ENABLED:
+            _sync_stories(app, config, client, storage, following_accounts)
     
     def _sync_following_with_activity(
         storage: StorageManager,
@@ -538,6 +549,36 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
         if unfollowed:
             logger.debug(f"{len(unfollowed)} accounts in activity table are no longer followed (keeping for history)")
     
+    def _download_media_file(
+        media_url: str,
+        local_path: Path,
+        content_id: str,
+        client: InstagramClient
+    ) -> Optional[tuple[Path, int]]:
+        """Download a single media file using client's retry logic.
+        
+        Args:
+            media_url: URL of the media to download
+            local_path: Path where media should be saved
+            content_id: ID of the post/story (for logging)
+            client: Instagram client with download_media method and retry logic
+            
+        Returns:
+            Tuple of (local_path, file_size) if successful, None otherwise
+        """
+        try:
+            # Use client's download_media method which includes retry logic
+            if client.download_media(media_url, str(local_path)):
+                file_size = local_path.stat().st_size
+                logger.debug(f"Downloaded media: {local_path}")
+                return local_path, file_size
+            else:
+                logger.error(f"Failed to download media {media_url}")
+                return None
+        except Exception as e:
+            logger.error(f"Failed to download media for {content_id}: {e}")
+            return None
+    
     def _download_post_media(post: InstagramPost, storage: StorageManager, client: InstagramClient):
         """Download media for a post using client's retry logic.
         
@@ -547,22 +588,181 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
             client: Instagram client with download_media method and retry logic
         """
         for idx, (media_url, media_type) in enumerate(zip(post.media_urls, post.media_types)):
+            local_path = storage.get_media_path(post.id, idx, media_type)
+            
+            result = _download_media_file(media_url, local_path, post.id, client)
+            if result:
+                _, file_size = result
+                relative_path = f"{post.id}/{local_path.name}"
+                storage.save_media(post.id, idx, media_url, media_type, relative_path, file_size)
+            
+            time.sleep(0.5)
+    
+    def _sync_stories(
+        app: Flask, 
+        config: Type[Config], 
+        client: InstagramClient,
+        storage: StorageManager,
+        following_accounts: List[FollowedAccount]
+    ):
+        """Sync Instagram stories using story polling manager.
+        
+        Args:
+            app: Flask application
+            config: Configuration object
+            client: Authenticated Instagram client
+            storage: Storage manager
+            following_accounts: List of following accounts
+        """
+        logger.info("Starting story sync")
+        
+        # Create story polling manager
+        story_manager = StoryPollingManager(
+            storage=storage,
+            instagram_client=client,
+            story_active_days=config.STORY_ACTIVE_DAYS,
+            story_inactive_days=config.STORY_INACTIVE_DAYS,
+            story_dormant_days=config.STORY_DORMANT_DAYS,
+            mute_refresh_hours=config.STORY_MUTE_REFRESH_HOURS
+        )
+        
+        # Check if this is first story sync (initialization needed)
+        if story_manager.is_first_sync():
+            logger.info("=" * 70)
+            logger.info("FIRST STORY SYNC - Initializing story activity profiles...")
+            logger.info("=" * 70)
+            
+            # Apply max accounts limit for testing
+            accounts_to_init = following_accounts
+            if config.MAX_ACCOUNTS_TO_FETCH > 0:
+                accounts_to_init = following_accounts[:config.MAX_ACCOUNTS_TO_FETCH]
+                logger.info(f"Testing mode: Limiting to {len(accounts_to_init)} accounts")
+            
+            # Initialize story activity profiles (checks mute status for each account)
+            distribution = story_manager.initialize_story_activity_profiles(accounts_to_init)
+            
+            # Mark as initialized
+            story_manager.mark_initialized()
+            
+            logger.info("=" * 70)
+            logger.info("Story activity profiles initialized:")
+            logger.info(f"   High priority: {distribution['high']} accounts")
+            logger.info(f"   Normal priority: {distribution['normal']} accounts")
+            logger.info(f"   Low priority: {distribution['low']} accounts")
+            logger.info(f"   Dormant: {distribution['dormant']} accounts")
+            logger.info(f"   Muted: {distribution['muted']} accounts")
+            logger.info("=" * 70)
+            
+            return
+        
+        # Check if mute status refresh is needed
+        if story_manager.should_refresh_mute_statuses():
+            logger.info("Refreshing story mute statuses (periodic refresh)")
+            newly_muted, newly_unmuted = story_manager.refresh_mute_statuses()
+            logger.info(f"Mute refresh: {newly_muted} newly muted, {newly_unmuted} newly unmuted")
+        
+        # Increment story cycle
+        story_manager.increment_cycle()
+        
+        # Get accounts to poll for stories this cycle
+        story_accounts_to_poll = story_manager.get_accounts_to_poll_this_cycle(
+            max_accounts=config.MAX_ACCOUNTS_TO_FETCH if config.MAX_ACCOUNTS_TO_FETCH > 0 else None
+        )
+        
+        if not story_accounts_to_poll:
+            logger.info("No accounts to poll for stories this cycle")
+            return
+        
+        logger.info(f"Story Cycle {story_manager.current_cycle}: Polling {len(story_accounts_to_poll)} accounts")
+        
+        # Poll each account for stories
+        total_new_stories = 0
+        accounts_with_new_stories = 0
+        
+        for idx, activity in enumerate(story_accounts_to_poll, 1):
             try:
-                local_path = storage.get_media_path(post.id, idx, media_type)
+                username = activity['username']
+                user_id = activity['user_id']
+                last_story_id = activity.get('last_story_id')
                 
-                # Use client's download_media method which includes retry logic
-                if client.download_media(media_url, str(local_path)):
-                    file_size = local_path.stat().st_size
-                    relative_path = f"{post.id}/{local_path.name}"
-                    storage.save_media(post.id, idx, media_url, media_type, relative_path, file_size)
-                    logger.debug(f"Downloaded media: {local_path}")
+                logger.info(
+                    f"[{idx}/{len(story_accounts_to_poll)}] Checking @{username} for stories "
+                    f"(priority: {activity['story_poll_priority']})"
+                )
+                
+                has_new, stories, metadata = client.check_account_for_new_stories(
+                    user_id=user_id,
+                    username=username,
+                    last_known_story_id=last_story_id
+                )
+                
+                if has_new and stories:
+                    accounts_with_new_stories += 1
+                    
+                    # Save new stories
+                    for story in stories:
+                        if not storage.story_exists(story.id):
+                            storage.save_story(story)
+                            _download_story_media(story, storage, client)
+                            total_new_stories += 1
+                    
+                    logger.info(f"@{username}: {len(stories)} stories fetched")
                 else:
-                    logger.error(f"Failed to download media {media_url}")
+                    logger.info(f"@{username}: No new stories")
                 
-                time.sleep(0.5)
+                # Update account priority
+                story_manager.update_account_priority_after_check(
+                    user_id=user_id,
+                    username=username,
+                    has_new_stories=has_new,
+                    story_metadata=metadata
+                )
+                
+                # Delay between accounts
+                time.sleep(1)
                 
             except Exception as e:
-                logger.error(f"Failed to download media for post {post.id}: {e}")
+                logger.error(
+                    f"Failed to check @{activity['username']} for stories: {e}",
+                    exc_info=True
+                )
+        
+        # Log summary
+        story_stats = story_manager.get_priority_stats()
+        logger.info("=" * 70)
+        logger.info(f"Story sync complete:")
+        logger.info(f"   Cycle: {story_stats['cycle']}")
+        logger.info(f"   Accounts polled: {len(story_accounts_to_poll)}")
+        logger.info(f"   Accounts with new stories: {accounts_with_new_stories}")
+        logger.info(f"   New stories saved: {total_new_stories}")
+        logger.info(f"   Priority distribution:")
+        for priority, count in story_stats['priority_distribution'].items():
+            logger.info(f"      {priority}: {count} accounts")
+        logger.info(f"   Muted accounts: {story_stats['muted_accounts']}")
+        logger.info("=" * 70)
+    
+    def _download_story_media(
+        story: InstagramStory,
+        storage: StorageManager,
+        client: InstagramClient
+    ):
+        """Download media for a story using client's retry logic.
+        
+        Args:
+            story: Instagram story with media to download
+            storage: Storage manager for saving media metadata
+            client: Instagram client with download_media method and retry logic
+        """
+        # Use get_story_path() for consistency
+        local_path = storage.get_story_path(story.id, story.media_type)
+        
+        result = _download_media_file(story.media_url, local_path, story.id, client)
+        if result:
+            _, file_size = result
+            relative_path = f"{story.id}/{local_path.name}"
+            
+            # Update story record with local path info
+            storage.update_story_media(story.id, relative_path, file_size)
     
     def _legacy_timeline_sync(app: Flask, config: Type[Config]):
         """Legacy timeline-based sync (original behavior)."""
