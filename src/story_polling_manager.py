@@ -6,7 +6,7 @@ story activity patterns, separate from post activity tracking.
 
 import logging
 from typing import List, Dict, Any, Optional, Set, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .storage import StorageManager
 from .following_manager import FollowedAccount
@@ -310,11 +310,13 @@ class StoryPollingManager:
         if isinstance(last_story_date, str):
             last_story_date = datetime.fromisoformat(last_story_date)
         
-        # Handle timezone-aware datetimes
-        if last_story_date.tzinfo is not None:
-            last_story_date = last_story_date.replace(tzinfo=None)
+        # Ensure both datetimes are timezone-aware for correct comparison
+        now = datetime.now(timezone.utc)
+        if last_story_date.tzinfo is None:
+            # Assume UTC if no timezone info
+            last_story_date = last_story_date.replace(tzinfo=timezone.utc)
         
-        days_since_story = (datetime.now() - last_story_date).days
+        days_since_story = (now - last_story_date).days
         
         # Priority based on recency and consecutive no-new checks
         if days_since_story <= self.story_active_days:
