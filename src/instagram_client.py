@@ -843,15 +843,34 @@ class InstagramClient:
             medias = []
             for media_data in items:
                 try:
-                    # Apply Pydantic fixes before extraction
+                    # Apply Pydantic fixes before extraction.
+                    # Instagram's API evolves faster than instagrapi's Pydantic
+                    # models, so we patch the raw JSON to avoid validation errors.
                     
-                    # Fix 1: clips_metadata.original_sound_info.audio_filter_infos
+                    # Fix 1: clips_metadata has several required fields that
+                    # Instagram now sometimes omits or sends as None. Rather than
+                    # constructing elaborate stubs, remove clips_metadata entirely
+                    # when it's broken — the post data (images, caption, etc.) is
+                    # all outside clips_metadata so we lose nothing important.
                     if "clips_metadata" in media_data:
-                        clips = media_data.get("clips_metadata", {})
-                        if isinstance(clips, dict) and "original_sound_info" in clips:
-                            sound_info = clips.get("original_sound_info", {})
-                            if isinstance(sound_info, dict) and sound_info.get("audio_filter_infos") is None:
-                                sound_info["audio_filter_infos"] = []
+                        clips = media_data.get("clips_metadata")
+                        remove_clips = False
+                        if not isinstance(clips, dict):
+                            remove_clips = True
+                        else:
+                            # mashup_info is required but sometimes missing
+                            if "mashup_info" not in clips:
+                                remove_clips = True
+                            # original_sound_info is required but sometimes None
+                            if clips.get("original_sound_info") is None:
+                                remove_clips = True
+                            # Fix audio_filter_infos being None (minor fix we can patch)
+                            elif isinstance(clips.get("original_sound_info"), dict):
+                                sound_info = clips["original_sound_info"]
+                                if sound_info.get("audio_filter_infos") is None:
+                                    sound_info["audio_filter_infos"] = []
+                        if remove_clips:
+                            del media_data["clips_metadata"]
                     
                     # Fix 2: image_versions2.candidates.scans_profile
                     if "image_versions2" in media_data:
