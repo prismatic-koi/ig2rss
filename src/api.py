@@ -531,6 +531,36 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
         if unfollowed:
             logger.debug(f"{len(unfollowed)} accounts in activity table are no longer followed (keeping for history)")
     
+    def _download_media_file(
+        media_url: str,
+        local_path: Path,
+        content_id: str,
+        client: InstagramClient
+    ) -> Optional[tuple[Path, int]]:
+        """Download a single media file using client's retry logic.
+        
+        Args:
+            media_url: URL of the media to download
+            local_path: Path where media should be saved
+            content_id: ID of the post/story (for logging)
+            client: Instagram client with download_media method and retry logic
+            
+        Returns:
+            Tuple of (local_path, file_size) if successful, None otherwise
+        """
+        try:
+            # Use client's download_media method which includes retry logic
+            if client.download_media(media_url, str(local_path)):
+                file_size = local_path.stat().st_size
+                logger.debug(f"Downloaded media: {local_path}")
+                return local_path, file_size
+            else:
+                logger.error(f"Failed to download media {media_url}")
+                return None
+        except Exception as e:
+            logger.error(f"Failed to download media for {content_id}: {e}")
+            return None
+    
     def _download_post_media(post: InstagramPost, storage: StorageManager, client: InstagramClient):
         """Download media for a post using client's retry logic.
         
@@ -540,22 +570,15 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
             client: Instagram client with download_media method and retry logic
         """
         for idx, (media_url, media_type) in enumerate(zip(post.media_urls, post.media_types)):
-            try:
-                local_path = storage.get_media_path(post.id, idx, media_type)
-                
-                # Use client's download_media method which includes retry logic
-                if client.download_media(media_url, str(local_path)):
-                    file_size = local_path.stat().st_size
-                    relative_path = f"{post.id}/{local_path.name}"
-                    storage.save_media(post.id, idx, media_url, media_type, relative_path, file_size)
-                    logger.debug(f"Downloaded media: {local_path}")
-                else:
-                    logger.error(f"Failed to download media {media_url}")
-                
-                time.sleep(0.5)
-                
-            except Exception as e:
-                logger.error(f"Failed to download media for post {post.id}: {e}")
+            local_path = storage.get_media_path(post.id, idx, media_type)
+            
+            result = _download_media_file(media_url, local_path, post.id, client)
+            if result:
+                _, file_size = result
+                relative_path = f"{post.id}/{local_path.name}"
+                storage.save_media(post.id, idx, media_url, media_type, relative_path, file_size)
+            
+            time.sleep(0.5)
     
     def _sync_stories(
         app: Flask, 
@@ -712,24 +735,16 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
             storage: Storage manager for saving media metadata
             client: Instagram client with download_media method and retry logic
         """
-        try:
-            # Determine file extension based on media type
-            ext = "mp4" if story.media_type == "video" else "jpg"
-            local_path = storage.get_media_path(story.id, 0, story.media_type)
+        # Use get_story_path() for consistency
+        local_path = storage.get_story_path(story.id, story.media_type)
+        
+        result = _download_media_file(story.media_url, local_path, story.id, client)
+        if result:
+            _, file_size = result
+            relative_path = f"{story.id}/{local_path.name}"
             
-            # Use client's download_media method which includes retry logic
-            if client.download_media(story.media_url, str(local_path)):
-                file_size = local_path.stat().st_size
-                relative_path = f"{story.id}/{local_path.name}"
-                
-                # Update story record with local path info
-                storage.update_story_media(story.id, relative_path, file_size)
-                logger.debug(f"Downloaded story media: {local_path}")
-            else:
-                logger.error(f"Failed to download story media {story.media_url}")
-                
-        except Exception as e:
-            logger.error(f"Failed to download media for story {story.id}: {e}")
+            # Update story record with local path info
+            storage.update_story_media(story.id, relative_path, file_size)
     
     def _legacy_timeline_sync(app: Flask, config: Type[Config]):
         """Legacy timeline-based sync (original behavior)."""

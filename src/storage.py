@@ -28,6 +28,27 @@ def convert_datetime(val: bytes) -> datetime:
     return datetime.fromisoformat(val.decode())
 
 
+def safe_json_dumps(obj: Any) -> Optional[str]:
+    """Safely serialize object to JSON string.
+    
+    Args:
+        obj: Object to serialize (typically dict or list)
+        
+    Returns:
+        JSON string if serialization successful, None otherwise
+    """
+    import json
+    
+    if obj is None:
+        return None
+    
+    try:
+        return json.dumps(obj)
+    except (TypeError, ValueError) as e:
+        logger.warning(f"Failed to serialize object to JSON: {e}. Object type: {type(obj)}")
+        return None
+
+
 sqlite3.register_adapter(datetime, adapt_datetime)
 sqlite3.register_converter("TIMESTAMP", convert_datetime)
 
@@ -44,6 +65,9 @@ class StorageManager:
         """
         self.db_path = db_path
         self.media_dir = Path(media_dir)
+        
+        # Cache for story_exists() calls to reduce DB queries
+        self._story_exists_cache: set = set()
         
         # Ensure directories exist
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -354,6 +378,24 @@ class StorageManager:
         post_dir = self.media_dir / post_id
         post_dir.mkdir(parents=True, exist_ok=True)
         return post_dir / f"{media_index}.{ext}"
+    
+    def get_story_path(self, story_id: str, media_type: str) -> Path:
+        """Generate filesystem path for a story media file.
+        
+        Organizes files as: media/<story_id>/0.<ext>
+        Similar to get_media_path but for stories (always index 0).
+        
+        Args:
+            story_id: Instagram story ID
+            media_type: 'image' or 'video'
+            
+        Returns:
+            Path object for the story media file
+        """
+        ext = "jpg" if media_type == "image" else "mp4"
+        story_dir = self.media_dir / story_id
+        story_dir.mkdir(parents=True, exist_ok=True)
+        return story_dir / f"0.{ext}"
     
     def save_media(self, post_id: str, media_index: int, media_url: str, 
                    media_type: str, local_path: str, file_size: int) -> bool:
@@ -855,16 +897,29 @@ class StorageManager:
     def story_exists(self, story_id: str) -> bool:
         """Check if a story already exists in the database.
         
+        Uses in-memory cache to reduce DB queries during bulk operations.
+        
         Args:
             story_id: Instagram story ID
             
         Returns:
             True if story exists, False otherwise
         """
+        # Check cache first
+        if story_id in self._story_exists_cache:
+            return True
+        
+        # Query database
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT 1 FROM stories WHERE id = ?", (story_id,))
-            return cursor.fetchone() is not None
+            exists = cursor.fetchone() is not None
+        
+        # Update cache if found
+        if exists:
+            self._story_exists_cache.add(story_id)
+        
+        return exists
     
     def save_story(self, story) -> bool:
         """Save a story to the database.
@@ -875,8 +930,6 @@ class StorageManager:
         Returns:
             True if save successful, False otherwise
         """
-        import json
-        
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -898,10 +951,13 @@ class StorageManager:
                     story.media_type,
                     story.permalink,
                     story.poll_question,
-                    json.dumps(story.poll_options) if story.poll_options else None,
+                    safe_json_dumps(story.poll_options),
                     story.link_text,
-                    json.dumps(story.sticker_text) if story.sticker_text else None
+                    safe_json_dumps(story.sticker_text)
                 ))
+                
+                # Add to cache
+                self._story_exists_cache.add(story.id)
                 
                 logger.info(f"Saved story {story.id} from @{story.username}")
                 return True

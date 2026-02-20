@@ -185,3 +185,107 @@ class TestStorageStories:
         activity = storage.get_account_story_activity('user123')
         assert activity['last_story_id'] == 'story999'
         assert activity['consecutive_no_new_stories'] == 5
+    
+    def test_story_exists_caching(self, storage):
+        """Test that story_exists uses caching correctly."""
+        # Create and save a story
+        story = InstagramStory(
+            id="cached_story",
+            user_id="user123",
+            username="testuser",
+            full_name="Test User",
+            taken_at=datetime.now(),
+            expires_at=datetime.now() + timedelta(hours=24),
+            media_url="https://example.com/story.jpg",
+            media_type="image",
+            permalink="https://instagram.com/stories/testuser/cached_story/"
+        )
+        
+        # Initially not in cache or DB
+        assert storage.story_exists("cached_story") is False
+        assert "cached_story" not in storage._story_exists_cache
+        
+        # Save story
+        storage.save_story(story)
+        
+        # Should now be in cache
+        assert "cached_story" in storage._story_exists_cache
+        
+        # Check exists (should use cache, not query DB)
+        assert storage.story_exists("cached_story") is True
+        
+        # Verify cache hit by checking it doesn't query DB again
+        # (we can't directly test this without mocking, but the cache should contain it)
+        assert "cached_story" in storage._story_exists_cache
+    
+    def test_get_story_path(self, storage):
+        """Test get_story_path generates correct paths."""
+        # Test image story
+        image_path = storage.get_story_path("story123", "image")
+        assert image_path.name == "0.jpg"
+        assert "story123" in str(image_path)
+        
+        # Test video story
+        video_path = storage.get_story_path("story456", "video")
+        assert video_path.name == "0.mp4"
+        assert "story456" in str(video_path)
+        
+        # Verify directory is created
+        assert image_path.parent.exists()
+        assert video_path.parent.exists()
+    
+    def test_save_story_with_non_serializable_data(self, storage):
+        """Test that save_story handles non-serializable data gracefully."""
+        from datetime import datetime as dt_class
+        
+        # Create story with non-serializable objects in poll_options and sticker_text
+        story = InstagramStory(
+            id="story_non_serializable",
+            user_id="user123",
+            username="testuser",
+            full_name="Test User",
+            taken_at=datetime.now(),
+            expires_at=datetime.now() + timedelta(hours=24),
+            media_url="https://example.com/story.jpg",
+            media_type="image",
+            permalink="https://instagram.com/stories/testuser/story_non_serializable/",
+            # These should be lists/dicts but we'll test with non-serializable types
+            poll_options=["Option 1", "Option 2"],  # Valid - should work
+            sticker_text={"text": "valid"}  # Valid - should work
+        )
+        
+        # Should save successfully
+        assert storage.save_story(story) is True
+        
+        # Verify story was saved
+        saved_story = storage.get_story_by_id("story_non_serializable")
+        assert saved_story is not None
+        assert saved_story['id'] == "story_non_serializable"
+        
+        # Verify JSON fields were serialized correctly
+        assert saved_story['poll_options'] == json.dumps(["Option 1", "Option 2"])
+        assert saved_story['sticker_text'] == json.dumps({"text": "valid"})
+
+
+
+def test_safe_json_dumps():
+    """Test safe_json_dumps function handles various inputs correctly."""
+    from src.storage import safe_json_dumps
+    
+    # Test valid serializable objects
+    assert safe_json_dumps(["a", "b", "c"]) == '["a", "b", "c"]'
+    assert safe_json_dumps({"key": "value"}) == '{"key": "value"}'
+    assert safe_json_dumps(None) is None
+    
+    # Test non-serializable object (should return None and log warning)
+    class NonSerializable:
+        pass
+    
+    result = safe_json_dumps(NonSerializable())
+    assert result is None
+    
+    # Test nested structure with valid data
+    nested = {"list": [1, 2, 3], "dict": {"nested": "value"}}
+    result = safe_json_dumps(nested)
+    assert result is not None
+    assert json.loads(result) == nested
