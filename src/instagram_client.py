@@ -1049,6 +1049,39 @@ class InstagramClient:
         
         return self._retry_with_backoff(_check)
     
+    def check_post_mute_status(self, user_id: str) -> bool:
+        """Check if posts are muted for a user.
+
+        Uses the ``muting`` field on the friendship relationship, which
+        corresponds to the "Mute posts" toggle in the Instagram UI.
+
+        Args:
+            user_id: Instagram user ID
+
+        Returns:
+            True if posts are muted, False otherwise
+
+        Raises:
+            InstagramChallengeError: If Instagram challenges the account
+        """
+        try:
+            relationship = self.client.user_friendship_v1(user_id)
+            is_muted = relationship.muting
+            logger.debug(f"User {user_id} post mute status: {is_muted}")
+            return is_muted
+        except ChallengeRequired as e:
+            raise InstagramChallengeError(
+                f"Challenge detected while checking post mute status for user {user_id}"
+            ) from e
+        except Exception as e:
+            if self._is_challenge_error(e):
+                raise InstagramChallengeError(
+                    f"Challenge detected while checking post mute status for user {user_id}"
+                ) from e
+            logger.error(f"Failed to check post mute status for {user_id}: {e}")
+            # Assume not muted on error (err on side of fetching)
+            return False
+
     def check_story_mute_status(self, user_id: str) -> bool:
         """Check if stories are muted for a user.
         

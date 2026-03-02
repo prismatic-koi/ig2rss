@@ -163,6 +163,7 @@ class StorageManager:
                 CREATE TABLE IF NOT EXISTS account_activity (
                     user_id TEXT PRIMARY KEY,
                     username TEXT NOT NULL,
+                    is_muting_posts BOOLEAN DEFAULT 0,
                     media_count INTEGER DEFAULT 0,
                     last_post_id TEXT,
                     last_post_date TIMESTAMP,
@@ -278,6 +279,28 @@ class StorageManager:
                     ON account_activity(last_post_date DESC)
                 """)
                 logger.info("Migration complete: account_activity now has ON DELETE CASCADE")
+            
+            # Migration: add is_muting_posts column if missing (Phase 3)
+            cursor.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='account_activity'"
+            )
+            row = cursor.fetchone()
+            if row and row[0] and "is_muting_posts" not in row[0].lower():
+                logger.info(
+                    "Migrating account_activity table to add is_muting_posts column"
+                )
+                cursor.execute("""
+                    ALTER TABLE account_activity
+                    ADD COLUMN is_muting_posts BOOLEAN DEFAULT 0
+                """)
+                logger.info("Migration complete: account_activity has is_muting_posts")
+            
+            # Migration: add is_muting_posts index if missing
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_activity_muting_posts
+                ON account_activity(is_muting_posts)
+            """)
             
             # Stories table (Phase 2: Stories Support)
             cursor.execute("""
@@ -776,8 +799,9 @@ class StorageManager:
         Args:
             user_id: Instagram user ID
             username: Instagram username
-            **kwargs: Optional fields - media_count, last_post_id, last_post_date,
-                     last_checked, poll_priority, consecutive_no_new_posts
+            **kwargs: Optional fields - is_muting_posts, media_count, last_post_id,
+                     last_post_date, last_checked, poll_priority,
+                     consecutive_no_new_posts
             
         Returns:
             True if successful, False otherwise
@@ -789,12 +813,14 @@ class StorageManager:
                 now = datetime.now()
                 cursor.execute("""
                     INSERT OR REPLACE INTO account_activity 
-                    (user_id, username, media_count, last_post_id, last_post_date,
-                     last_checked, poll_priority, consecutive_no_new_posts, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (user_id, username, is_muting_posts, media_count, last_post_id,
+                     last_post_date, last_checked, poll_priority,
+                     consecutive_no_new_posts, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     user_id,
                     username,
+                    kwargs.get('is_muting_posts', False),
                     kwargs.get('media_count', 0),
                     kwargs.get('last_post_id'),
                     kwargs.get('last_post_date'),
@@ -829,8 +855,9 @@ class StorageManager:
                 update_fields = []
                 values = []
                 for key, value in kwargs.items():
-                    if key in ['media_count', 'last_post_id', 'last_post_date', 
-                              'last_checked', 'poll_priority', 'consecutive_no_new_posts']:
+                    if key in ['is_muting_posts', 'media_count', 'last_post_id',
+                               'last_post_date', 'last_checked', 'poll_priority',
+                               'consecutive_no_new_posts']:
                         update_fields.append(f"{key} = ?")
                         values.append(value)
                 
@@ -897,6 +924,29 @@ class StorageManager:
                 
         except Exception as e:
             logger.error(f"Failed to get all account activity: {e}")
+            return []
+    
+    def get_unmuted_accounts_for_posts(self) -> List[Dict[str, Any]]:
+        """Get all accounts where is_muting_posts = False.
+        
+        Returns:
+            List of activity dictionaries for unmuted accounts
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT * FROM account_activity
+                    WHERE is_muting_posts = 0
+                    ORDER BY last_checked ASC
+                """)
+                accounts = [dict(row) for row in cursor.fetchall()]
+                logger.debug(
+                    f"Retrieved {len(accounts)} unmuted accounts for posts"
+                )
+                return accounts
+        except Exception as e:
+            logger.error(f"Failed to get unmuted accounts for posts: {e}")
             return []
     
     def get_accounts_by_priority(self, priority: str) -> List[Dict[str, Any]]:
