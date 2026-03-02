@@ -614,7 +614,7 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
         # Optional: Log unfollowed accounts (but keep them for historical data)
         unfollowed = [uid for uid in existing_activities if uid not in following_user_ids]
         if unfollowed:
-                logger.debug(f"{len(unfollowed)} accounts in activity table are no longer followed (keeping for history)")
+            logger.debug(f"{len(unfollowed)} accounts in activity table are no longer followed (keeping for history)")
     
     def _download_post_media(post: InstagramPost, storage: StorageManager, client: InstagramClient):
         """Download media for a post using client's retry logic.

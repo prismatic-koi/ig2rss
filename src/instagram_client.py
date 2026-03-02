@@ -1228,35 +1228,32 @@ class InstagramClient:
         """
         logger.debug(f"Checking @{username} for new stories")
         
-        def _check():
-            metadata: Dict[str, Any] = {
-                'latest_story_id': None,
-                'latest_story_date': None,
-                'story_count': 0
-            }
-            
-            # Fetch current stories
-            stories = self.fetch_user_stories(user_id, username)
-            
-            if not stories:
-                return False, [], metadata
-            
-            # Update metadata
-            # Stories are ordered by taken_at (newest first from Instagram)
-            latest_story = stories[0]
-            metadata['latest_story_id'] = latest_story.id
-            metadata['latest_story_date'] = latest_story.taken_at
-            metadata['story_count'] = len(stories)
-            
-            # Check if we have new stories
-            if last_known_story_id and latest_story.id == last_known_story_id:
-                logger.debug(f"@{username}: No new stories")
-                return False, [], metadata
-            
-            logger.info(f"@{username}: {len(stories)} stories detected")
-            return True, stories, metadata
+        metadata: Dict[str, Any] = {
+            'latest_story_id': None,
+            'latest_story_date': None,
+            'story_count': 0
+        }
         
-        return self._retry_with_backoff(_check)
+        # Fetch current stories (fetch_user_stories already uses _retry_with_backoff)
+        stories = self.fetch_user_stories(user_id, username)
+        
+        if not stories:
+            return False, [], metadata
+        
+        # Update metadata
+        # Stories are ordered by taken_at (newest first from Instagram)
+        latest_story = stories[0]
+        metadata['latest_story_id'] = latest_story.id
+        metadata['latest_story_date'] = latest_story.taken_at
+        metadata['story_count'] = len(stories)
+        
+        # Check if we have new stories
+        if last_known_story_id and latest_story.id == last_known_story_id:
+            logger.debug(f"@{username}: No new stories")
+            return False, [], metadata
+        
+        logger.info(f"@{username}: {len(stories)} stories detected")
+        return True, stories, metadata
     
     def logout(self):
         """Log out and clear session."""

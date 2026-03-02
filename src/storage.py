@@ -1063,11 +1063,25 @@ class StorageManager:
                 cursor = conn.cursor()
                 
                 cursor.execute("""
-                    INSERT OR REPLACE INTO stories
+                    INSERT INTO stories
                     (id, user_id, username, full_name, taken_at, expires_at,
                      media_url, media_type, permalink, poll_question, poll_options,
                      link_text, sticker_text, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(id) DO UPDATE SET
+                        user_id = excluded.user_id,
+                        username = excluded.username,
+                        full_name = excluded.full_name,
+                        taken_at = excluded.taken_at,
+                        expires_at = excluded.expires_at,
+                        media_url = excluded.media_url,
+                        media_type = excluded.media_type,
+                        permalink = excluded.permalink,
+                        poll_question = excluded.poll_question,
+                        poll_options = excluded.poll_options,
+                        link_text = excluded.link_text,
+                        sticker_text = excluded.sticker_text,
+                        updated_at = CURRENT_TIMESTAMP
                 """, (
                     story.id,
                     story.user_id,
