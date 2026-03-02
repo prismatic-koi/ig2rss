@@ -284,6 +284,43 @@ class TestAccountStoryActivity:
         assert activity["last_story_id"] == "story999"
         assert activity["consecutive_no_new_stories"] == 5
 
+    def test_upsert_preserves_existing_fields(self, storage):
+        """Test that UPSERT only overwrites fields explicitly passed in kwargs.
+
+        Regression test: previously, calling save_account_story_activity with
+        partial kwargs would reset unmentioned fields to their defaults on
+        the ON CONFLICT path.
+        """
+        self._create_following_account(storage)
+
+        # Initial save with all fields set to specific values
+        storage.save_account_story_activity(
+            user_id="user123",
+            username="testuser",
+            is_muting_stories=True,
+            story_poll_priority="high",
+            consecutive_no_new_stories=7,
+            stories_fetched_count=42,
+            last_story_id="story_abc",
+        )
+
+        # Re-save with only is_muting_stories — other fields should survive
+        storage.save_account_story_activity(
+            user_id="user123",
+            username="testuser",
+            is_muting_stories=False,
+        )
+
+        activity = storage.get_account_story_activity("user123")
+        assert activity is not None
+        # The field we explicitly passed should be updated
+        assert activity["is_muting_stories"] == 0  # False -> 0 in SQLite
+        # Fields NOT passed should retain their prior values
+        assert activity["story_poll_priority"] == "high"
+        assert activity["consecutive_no_new_stories"] == 7
+        assert activity["stories_fetched_count"] == 42
+        assert activity["last_story_id"] == "story_abc"
+
 
 class TestSafeJsonDumps:
     """Tests for safe_json_dumps module-level function."""

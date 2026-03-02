@@ -807,14 +807,23 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                 if has_new and stories:
                     accounts_with_new_stories += 1
                     
-                    # Save new stories
+                    # Save new stories (skip already-known ones)
+                    new_story_count = 0
                     for story in stories:
                         if not storage.story_exists(story.id):
                             storage.save_story(story)
                             _download_story_media(story, storage, client)
                             total_new_stories += 1
+                            new_story_count += 1
                     
-                    logger.info(f"@{username}: {len(stories)} stories fetched")
+                    # Override story_count with actual new stories saved so
+                    # priority tracking reflects reality, not total API count
+                    metadata['story_count'] = new_story_count
+                    
+                    logger.info(
+                        f"@{username}: {new_story_count} new stories saved "
+                        f"({len(stories)} total from API)"
+                    )
                 else:
                     logger.info(f"@{username}: No new stories")
                 

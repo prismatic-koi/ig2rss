@@ -7,6 +7,7 @@ media files on the filesystem.
 import json
 import logging
 import sqlite3
+import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -71,8 +72,10 @@ class StorageManager:
         
         # Bounded cache for story_exists() to reduce DB queries.
         # Uses OrderedDict as an LRU cache with a max size of 10000 entries.
+        # Protected by a lock for thread safety (Flask + APScheduler).
         self._story_exists_cache: OrderedDict = OrderedDict()
         self._story_cache_max_size: int = 10000
+        self._story_cache_lock = threading.Lock()
         
         # Ensure directories exist
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1023,6 +1026,7 @@ class StorageManager:
         
         Uses a bounded in-memory LRU cache to reduce DB queries during
         bulk operations. Cache is limited to _story_cache_max_size entries.
+        Thread-safe via _story_cache_lock.
         
         Args:
             story_id: Instagram story ID
@@ -1031,11 +1035,12 @@ class StorageManager:
             True if story exists, False otherwise
         """
         # Check cache first (move to end for LRU behavior)
-        if story_id in self._story_exists_cache:
-            self._story_exists_cache.move_to_end(story_id)
-            return True
+        with self._story_cache_lock:
+            if story_id in self._story_exists_cache:
+                self._story_exists_cache.move_to_end(story_id)
+                return True
         
-        # Query database
+        # Query database (outside lock — DB has its own locking)
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT 1 FROM stories WHERE id = ?", (story_id,))
@@ -1043,9 +1048,10 @@ class StorageManager:
         
         # Update cache if found (evict oldest if full)
         if exists:
-            self._story_exists_cache[story_id] = True
-            if len(self._story_exists_cache) > self._story_cache_max_size:
-                self._story_exists_cache.popitem(last=False)
+            with self._story_cache_lock:
+                self._story_exists_cache[story_id] = True
+                if len(self._story_exists_cache) > self._story_cache_max_size:
+                    self._story_exists_cache.popitem(last=False)
         
         return exists
     
@@ -1099,9 +1105,10 @@ class StorageManager:
                 ))
                 
                 # Add to cache (evict oldest if full)
-                self._story_exists_cache[story.id] = True
-                if len(self._story_exists_cache) > self._story_cache_max_size:
-                    self._story_exists_cache.popitem(last=False)
+                with self._story_cache_lock:
+                    self._story_exists_cache[story.id] = True
+                    if len(self._story_exists_cache) > self._story_cache_max_size:
+                        self._story_exists_cache.popitem(last=False)
                 
                 logger.info(f"Saved story {story.id} from @{story.username}")
                 return True
@@ -1207,8 +1214,10 @@ class StorageManager:
     ) -> bool:
         """Save or update account story activity data.
         
-        Uses UPSERT (INSERT ... ON CONFLICT DO UPDATE) to preserve existing
-        data on update, matching the pattern used by save_following_accounts().
+        Uses UPSERT (INSERT ... ON CONFLICT DO UPDATE). On insert, missing
+        kwargs get sensible defaults. On conflict (update), only fields
+        explicitly passed in kwargs are overwritten — existing values for
+        fields not in kwargs are preserved.
         
         Args:
             user_id: Instagram user ID
@@ -1225,22 +1234,31 @@ class StorageManager:
                 cursor = conn.cursor()
                 
                 now = datetime.now()
-                cursor.execute("""
+                
+                # Build the ON CONFLICT SET clause dynamically so we only
+                # overwrite fields the caller explicitly provided.
+                updatable_fields = [
+                    'is_muting_stories', 'last_story_id', 'last_story_date',
+                    'last_checked', 'story_poll_priority',
+                    'consecutive_no_new_stories', 'stories_fetched_count',
+                ]
+                conflict_sets = ["username = excluded.username"]
+                for field in updatable_fields:
+                    if field in kwargs:
+                        conflict_sets.append(
+                            f"{field} = excluded.{field}"
+                        )
+                conflict_sets.append("updated_at = excluded.updated_at")
+                conflict_clause = ",\n                        ".join(conflict_sets)
+                
+                cursor.execute(f"""
                     INSERT INTO account_story_activity
                     (user_id, username, is_muting_stories, last_story_id,
                      last_story_date, last_checked, story_poll_priority,
                      consecutive_no_new_stories, stories_fetched_count, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(user_id) DO UPDATE SET
-                        username = excluded.username,
-                        is_muting_stories = excluded.is_muting_stories,
-                        last_story_id = excluded.last_story_id,
-                        last_story_date = excluded.last_story_date,
-                        last_checked = excluded.last_checked,
-                        story_poll_priority = excluded.story_poll_priority,
-                        consecutive_no_new_stories = excluded.consecutive_no_new_stories,
-                        stories_fetched_count = excluded.stories_fetched_count,
-                        updated_at = excluded.updated_at
+                        {conflict_clause}
                 """, (
                     user_id,
                     username,
