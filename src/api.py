@@ -285,6 +285,7 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
         
         polling_manager = AccountPollingManager(
             storage=storage,
+            instagram_client=client,
             priority_high_days=config.PRIORITY_HIGH_DAYS,
             priority_normal_days=config.PRIORITY_NORMAL_DAYS,
             priority_low_days=config.PRIORITY_LOW_DAYS,
@@ -397,6 +398,18 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                 posts_by_account=posts_by_account
             )
             
+            # Record initial mute statuses (if no challenge abort)
+            if not challenge_abort:
+                logger.info("Checking post mute statuses during initialization...")
+                try:
+                    newly_muted, _ = polling_manager.refresh_mute_statuses()
+                    logger.info(f"Post mute check complete: {newly_muted} accounts muted")
+                except InstagramChallengeError:
+                    logger.error(
+                        "CHALLENGE DETECTED during post mute check! "
+                        "Mute statuses will be populated on next refresh."
+                    )
+            
             # Check initialization success rate
             successful_accounts = sum(1 for posts in posts_by_account.values() if posts)
             total_accounts = len(following_accounts)
@@ -448,6 +461,22 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
                 logger.error("Failed to re-authenticate. Aborting sync.")
                 return
             logger.info("Re-authentication successful. Proceeding with sync.")
+        
+        # Refresh post mute statuses if due
+        if polling_manager.should_refresh_mute_statuses():
+            logger.info("Refreshing post mute statuses (periodic refresh)")
+            try:
+                newly_muted, newly_unmuted = polling_manager.refresh_mute_statuses()
+                logger.info(
+                    f"Post mute refresh: {newly_muted} newly muted, "
+                    f"{newly_unmuted} newly unmuted"
+                )
+            except InstagramChallengeError:
+                logger.error(
+                    "CHALLENGE DETECTED during post mute refresh! "
+                    "Aborting sync."
+                )
+                return
         
         # Refresh following list (respects cache TTL)
         following_accounts = following_manager.get_following_list()
@@ -573,6 +602,7 @@ def init_scheduler(app: Flask, config: Type[Config]) -> BackgroundScheduler:
         logger.info(f"   Priority distribution:")
         for priority, count in stats['distribution'].items():
             logger.info(f"      {priority}: {count} accounts")
+        logger.info(f"   Muted accounts: {stats['muted_accounts']}")
         logger.info("=" * 70)
         
         # Story sync (if enabled and no challenge abort)

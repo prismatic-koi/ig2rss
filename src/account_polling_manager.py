@@ -7,11 +7,12 @@ activity patterns. It uses a hybrid approach:
 """
 
 import logging
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Tuple
 from datetime import datetime, timedelta
 
 from .storage import StorageManager
 from .following_manager import FollowedAccount
+from .instagram_client import InstagramClient, InstagramChallengeError
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ class AccountPollingManager:
     def __init__(
         self,
         storage: StorageManager,
+        instagram_client: Optional[InstagramClient] = None,
         priority_high_days: int = 7,
         priority_normal_days: int = 30,
         priority_low_days: int = 180,
@@ -30,12 +32,14 @@ class AccountPollingManager:
         poll_normal_every_n: int = 1,
         poll_low_every_n: int = 3,
         poll_dormant_every_n: int = 12,
-        priority_overrides: Optional[List[str]] = None
+        priority_overrides: Optional[List[str]] = None,
+        mute_refresh_hours: int = 24,
     ):
         """Initialize account polling manager.
         
         Args:
             storage: StorageManager instance
+            instagram_client: InstagramClient instance for mute checks (optional)
             priority_high_days: Days threshold for high priority (default: 7)
             priority_normal_days: Days threshold for normal priority (default: 30)
             priority_low_days: Days threshold for low priority (default: 180)
@@ -44,8 +48,10 @@ class AccountPollingManager:
             poll_low_every_n: Poll low priority accounts every N cycles (default: 3)
             poll_dormant_every_n: Poll dormant accounts every N cycles (default: 12)
             priority_overrides: List of usernames to force to HIGH priority
+            mute_refresh_hours: Hours between post mute status refreshes (default: 24)
         """
         self.storage = storage
+        self.instagram_client = instagram_client
         self.priority_high_days = priority_high_days
         self.priority_normal_days = priority_normal_days
         self.priority_low_days = priority_low_days
@@ -54,6 +60,7 @@ class AccountPollingManager:
         self.poll_low_every_n = poll_low_every_n
         self.poll_dormant_every_n = poll_dormant_every_n
         self.priority_overrides = set(priority_overrides or [])
+        self.mute_refresh_hours = mute_refresh_hours
         
         self.current_cycle = self._load_cycle_number()
         
@@ -203,6 +210,7 @@ class AccountPollingManager:
         """Get accounts that should be polled in this cycle.
         
         Uses priority-based scheduling to determine which accounts to check.
+        Only includes accounts where posts are not muted.
         
         Args:
             max_accounts: Maximum number of accounts to return (None=unlimited)
@@ -212,8 +220,8 @@ class AccountPollingManager:
         """
         accounts_to_poll = []
         
-        # Get all account activities
-        all_activities = self.storage.get_all_account_activity()
+        # Get unmuted account activities only
+        all_activities = self.storage.get_unmuted_accounts_for_posts()
         
         if not all_activities:
             logger.warning("No account activity records found")
@@ -378,6 +386,89 @@ class AccountPollingManager:
         # No posts or very old posts = dormant
         return 'dormant'
     
+    def should_refresh_mute_statuses(self) -> bool:
+        """Check if post mute statuses should be refreshed.
+
+        Returns:
+            True if mute refresh is needed
+        """
+        last_refresh_str = self.storage.get_sync_metadata('last_post_mute_refresh')
+
+        if not last_refresh_str:
+            return True
+
+        try:
+            last_refresh = datetime.fromisoformat(last_refresh_str)
+            hours_since_refresh = (
+                (datetime.now() - last_refresh).total_seconds() / 3600
+            )
+            return hours_since_refresh >= self.mute_refresh_hours
+        except (ValueError, TypeError):
+            logger.warning(
+                f"Invalid last_post_mute_refresh value: {last_refresh_str}"
+            )
+            return True
+
+    def refresh_mute_statuses(self) -> Tuple[int, int]:
+        """Refresh post mute status for all accounts.
+
+        Propagates InstagramChallengeError to the caller so the
+        polling cycle can be aborted.
+
+        Returns:
+            Tuple of (newly_muted_count, newly_unmuted_count)
+
+        Raises:
+            InstagramChallengeError: If Instagram challenges the account
+            RuntimeError: If instagram_client was not provided
+        """
+        if self.instagram_client is None:
+            raise RuntimeError(
+                "instagram_client is required for mute status refresh"
+            )
+
+        logger.info("Refreshing post mute statuses for all accounts")
+
+        all_activities = self.storage.get_all_account_activity()
+        newly_muted = 0
+        newly_unmuted = 0
+
+        for activity in all_activities:
+            old_muted = bool(activity.get('is_muting_posts', False))
+            # InstagramChallengeError will propagate up
+            new_muted = self.instagram_client.check_post_mute_status(
+                activity['user_id']
+            )
+
+            if old_muted != new_muted:
+                if new_muted:
+                    newly_muted += 1
+                    logger.info(
+                        f"@{activity['username']}: Posts newly muted"
+                    )
+                else:
+                    newly_unmuted += 1
+                    logger.info(
+                        f"@{activity['username']}: Posts newly unmuted"
+                    )
+
+                self.storage.update_account_activity(
+                    activity['user_id'],
+                    is_muting_posts=new_muted,
+                )
+
+        # Update last refresh timestamp
+        self.storage.save_sync_metadata(
+            'last_post_mute_refresh', datetime.now().isoformat()
+        )
+
+        logger.info(
+            f"Post mute refresh complete: {newly_muted} newly muted, "
+            f"{newly_unmuted} newly unmuted"
+        )
+
+        return newly_muted, newly_unmuted
+
     def get_priority_stats(self) -> Dict[str, Any]:
         """Get statistics about current priority distribution.
         
@@ -389,6 +480,9 @@ class AccountPollingManager:
         
         # Calculate additional stats
         total_accounts = len(all_activities)
+        muted_count = sum(
+            1 for a in all_activities if a.get('is_muting_posts', False)
+        )
         
         # Count accounts eligible for this cycle
         eligible_count = len(self.get_accounts_to_poll_this_cycle())
@@ -398,5 +492,6 @@ class AccountPollingManager:
             'cycle': self.current_cycle,
             'distribution': distribution,
             'eligible_this_cycle': eligible_count,
-            'priority_overrides': len(self.priority_overrides)
+            'priority_overrides': len(self.priority_overrides),
+            'muted_accounts': muted_count,
         }
